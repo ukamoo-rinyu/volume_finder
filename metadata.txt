@@ -2,7 +2,7 @@
 name=建築規制ボリューム検討
 qgisMinimumVersion=3.22
 description=敷地条件から建築規制を満たす延床面積の最大ボリュームを探索する。日影図・高さ制限チェッカー（HTMLツール）とJSONで連携する。
-version=0.1.0
+version=0.1.1
 author=rinyu
 email=ukamoo@gmail.com
 
