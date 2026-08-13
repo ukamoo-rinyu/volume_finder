@@ -99,7 +99,7 @@ def shadow_reach_distance(effective_height: float, phi_deg: float = 35.0) -> flo
     return effective_height * max_shadow_multiplier(phi_deg)
 
 
-def shadow_bands(
+def shadow_raster(
     cx: float,
     cy: float,
     W: float,
@@ -112,23 +112,30 @@ def shadow_bands(
     cell: Optional[float] = None,
     max_grid_span: float = 150.0,
     phi_deg: float = 35.0,
-) -> dict:
-    """建物1棟について、5-10m帯・10m超帯の最大日影時間(h)を返す。
+) -> Optional[dict]:
+    """建物1棟について、日影時間のラスタ（HTMLの computeIso() の中核）を計算する。
 
-    HTMLの computeIso() の中核（1棟のみ対応）。段階3は「単純な直方体
-    1棟のみ」という設計書8.3の既知の限界と一致するスコープなので、
-    複数棟の日影重なり処理（HTML版のmark配列によるタイムステップ内
-    重複排除）は省いている。
+    段階3は「単純な直方体1棟のみ」という設計書8.3の既知の限界と一致する
+    スコープなので、複数棟の日影重なり処理（HTML版のmark配列による
+    タイムステップ内重複排除）は省いている。
 
     deemed_boundary: 日影規制のみなし境界線（敷地形状を辺ごとの
     core.regulation.hikage_relax 分だけ外側にオフセットしたもの。
     core.geometry.offset_polygon_per_edge で作る）。
 
-    Returns {"max_5_10": float, "max_10plus": float} (時間, h)。
+    Returns {"X","Y" (格子座標), "total" (各セルの日影時間h), "dist"
+    (みなし境界線までの距離), "measurable" (みなし境界線の外＝測定対象)}。
+    測定面より建物が低ければ None（影が生じない）。
+
+    bands_from_raster() と組み合わせて使う: ラスタ自体（時刻ループを含む、
+    最も重い部分）は測定面高さ(mh)ごとに1回だけ計算し、複数の区域
+    （影が落ちる先の区域ごとに異なるマスク範囲・規制時間）の判定に
+    使い回すことで、区域数ぶんラスタ計算を繰り返さずに済む
+    （設計書3.6・3.5、複数の日影規制区域を個別に判定するための土台）。
     """
     eff_top = H - mh
     if eff_top <= 0:
-        return {"max_5_10": 0.0, "max_10plus": 0.0}
+        return None
 
     rot = rot_deg * _DEG
     cos_r, sin_r = math.cos(rot), math.sin(rot)
@@ -181,8 +188,56 @@ def shadow_bands(
         mask = _shadow_mask(U, Vloc, ou, ov, hw, hd)
         total += mask * dt_h
 
+    return {"X": X, "Y": Y, "total": total, "dist": dist, "measurable": measurable}
+
+
+def bands_from_raster(raster: Optional[dict], mask_polygon: Optional[Sequence[Tuple[float, float]]] = None) -> dict:
+    """ラスタ（shadow_rasterの戻り値）から、5-10m帯・10m超帯の最大日影時間(h)を取り出す。
+
+    mask_polygon を指定すると、そのポリゴンの内側にあるセルだけを対象に
+    する。「影が落ちる先の区域」（法56条の2第4項）の規制は、影が実際に
+    その区域の土地に落ちている部分にしか適用されないため、対象区域の
+    ポリゴンで絞り込んでから最大日影時間を求める必要がある（区域の外の
+    土地に落ちる影の長さでその区域の規制を判定してはいけない）。
+
+    Returns {"max_5_10": float, "max_10plus": float} (時間, h)。
+    """
+    if raster is None:
+        return {"max_5_10": 0.0, "max_10plus": 0.0}
+    measurable = raster["measurable"]
+    if mask_polygon:
+        measurable = measurable & geo.point_in_polygon_mask(raster["X"], raster["Y"], mask_polygon)
+    dist = raster["dist"]
+    total = raster["total"]
     band1 = total[measurable & (dist > 5) & (dist <= 10)]
     band2 = total[measurable & (dist > 10)]
     max1 = float(band1.max()) if band1.size else 0.0
     max2 = float(band2.max()) if band2.size else 0.0
     return {"max_5_10": max1, "max_10plus": max2}
+
+
+def shadow_bands(
+    cx: float,
+    cy: float,
+    W: float,
+    D: float,
+    rot_deg: float,
+    H: float,
+    deemed_boundary: Sequence[Tuple[float, float]],
+    mh: float = 4.0,
+    dt_minutes: float = 5.0,
+    cell: Optional[float] = None,
+    max_grid_span: float = 150.0,
+    phi_deg: float = 35.0,
+) -> dict:
+    """建物1棟について、敷地全周（マスクなし）の5-10m帯・10m超帯の
+    最大日影時間(h)を返す（shadow_raster + bands_from_raster の単純合成）。
+
+    敷地自身の用途地域が日影規制の対象のときに使う（法56条の2の原則:
+    規制対象区域内の建築物からの影は、受ける側の土地の用途地域を問わず
+    規制される）。「影が落ちる先の区域」判定のように区域ごとにマスクが
+    必要な場合は、shadow_raster()を1回呼んでから bands_from_raster()を
+    区域の数だけ呼ぶこと（時刻ループの計算を使い回せる）。
+    """
+    raster = shadow_raster(cx, cy, W, D, rot_deg, H, deemed_boundary, mh, dt_minutes, cell, max_grid_span, phi_deg)
+    return bands_from_raster(raster)

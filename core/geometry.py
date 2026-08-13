@@ -219,9 +219,28 @@ def edge_vector(pts: Sequence[Point], i: int) -> Tuple[Point, Point, Point, Poin
     return a, b, direction, normal
 
 
-def inward_distance(p: Point, edge_a: Point, normal: Point) -> float:
-    """辺の境界線（直線）からpまでの、内向きを正とする符号付き距離 (HTMLの inwardDist)。"""
-    return -((p[0] - edge_a[0]) * normal[0] + (p[1] - edge_a[1]) * normal[1])
+def inward_distance(
+    p: Point, edge_a: Point, edge_b: Point, direction: Point, normal: Point
+) -> float:
+    """辺iの後退距離（斜線制限のA）算出に使う、pから辺iまでの距離 (HTMLの inwardDist)。
+
+    pを辺の方向に射影した位置が辺の区間 [0, 辺長] に収まる場合は、
+    従来どおり境界線（直線）までの符号付き垂直距離（内向きが正）を返す。
+    敷地が凹んでいると、ある辺の境界線を延長した直線が敷地の別の場所を
+    かすめることがあり、その辺とは無関係な頂点が「たまたま延長線の近く
+    にある」というだけで後退距離がほぼ0と誤って計算されてしまう
+    （ver0.2.0で発見・修正。HTML側 hikage-osaka-v4_23.html の inwardDist も
+    同じ修正を行った）。区間の外側に射影される場合は、辺の端点までの
+    ユークリッド距離（延長線ではなく実際の辺そのものまでの距離）を返す
+    ことでこれを防ぐ。
+    """
+    length = math.hypot(edge_b[0] - edge_a[0], edge_b[1] - edge_a[1])
+    t = (p[0] - edge_a[0]) * direction[0] + (p[1] - edge_a[1]) * direction[1]
+    if 0.0 <= t <= length:
+        return -((p[0] - edge_a[0]) * normal[0] + (p[1] - edge_a[1]) * normal[1])
+    tc = max(0.0, min(length, t))
+    ex, ey = edge_a[0] + direction[0] * tc, edge_a[1] + direction[1] * tc
+    return math.hypot(p[0] - ex, p[1] - ey)
 
 
 def offset_polygon_per_edge(pts: Sequence[Point], offsets: Sequence[float]) -> List[Point]:
@@ -415,6 +434,100 @@ def candidate_seed_points(poly: Sequence[Point], k: int = 4, grid_steps: int = 6
         if len(picked) >= k:
             break
     return picked
+
+
+def local_bounding_box(poly: Sequence[Point], rot_deg: float) -> Tuple[float, float, float, float]:
+    """polyの頂点を、建物と同じ (u,v) ローカル座標系（rectangle_corners()と同じ
+    向き: u軸=(cos,-sin)方向、v軸=(sin,cos)方向）に変換したときの外接矩形
+    [Umin,Umax,Vmin,Vmax]（ver0.2.0仕様2章「アンカー配置制約」のローカル
+    座標系）。rot_deg=0 なら u=world x（東+）、v=world y（北+）と一致する。
+    """
+    rot = math.radians(rot_deg)
+    cos_r, sin_r = math.cos(rot), math.sin(rot)
+    us = [p[0] * cos_r - p[1] * sin_r for p in poly]
+    vs = [p[0] * sin_r + p[1] * cos_r for p in poly]
+    return min(us), max(us), min(vs), max(vs)
+
+
+def local_to_world_center(u_center: float, v_center: float, rot_deg: float) -> Point:
+    """local_bounding_boxのu,v座標系にある点を、rectangle_corners()が使う
+    world (cx,cy) に変換する（local_bounding_boxの逆変換）。"""
+    rot = math.radians(rot_deg)
+    cos_r, sin_r = math.cos(rot), math.sin(rot)
+    return (u_center * cos_r + v_center * sin_r, -u_center * sin_r + v_center * cos_r)
+
+
+def max_inscribed_rectangle(mask: np.ndarray) -> Tuple[int, int, int, int, int]:
+    """0/1のブールグリッドから、軸並行の最大内接矩形をヒストグラム法で求める
+    (ver0.2.0仕様3.2、O(行数×列数))。
+
+    Returns (area_cells, col0, row0, width_cells, height_cells)。
+    見つからなければ (0, 0, 0, 0, 0)。
+    """
+    rows, cols = mask.shape
+    if rows == 0 or cols == 0:
+        return (0, 0, 0, 0, 0)
+    height = [0] * cols
+    best_area = 0
+    best_rect = (0, 0, 0, 0)  # col0, row0, width, height
+    for r in range(rows):
+        for c in range(cols):
+            height[c] = height[c] + 1 if mask[r, c] else 0
+        stack: List[Tuple[int, int]] = []  # (start_col, height)
+        for c in range(cols + 1):
+            h = height[c] if c < cols else 0
+            start = c
+            while stack and stack[-1][1] > h:
+                s, ht = stack.pop()
+                area = ht * (c - s)
+                if area > best_area:
+                    best_area = area
+                    best_rect = (s, r - ht + 1, c - s, ht)
+                start = s
+            if h > 0:
+                stack.append((start, h))
+    return (best_area, *best_rect)
+
+
+def effective_open_space(
+    site_pts: Sequence[Point],
+    building_corners_list: Sequence[Sequence[Point]],
+    cell: float = 0.5,
+) -> dict:
+    """「まとまった使える空地があるか」を最大内接矩形で評価する (ver0.2.0仕様3.2)。
+
+    site_pts内部にあり、かつどの建物外形（building_corners_listの各要素、
+    world座標の矩形4隅）の外部でもあるセルを空地とみなし、その空地マスクの
+    最大内接矩形（軸並行、0.5mグリッド既定）を返す。
+
+    Returns {"area": m², "min_side": m, "residual_area": m²}。
+    敷地が空、または残余地がなければ area=min_side=0。
+    """
+    xs = [p[0] for p in site_pts]
+    ys = [p[1] for p in site_pts]
+    if not xs or not ys:
+        return {"area": 0.0, "min_side": 0.0, "residual_area": 0.0}
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    nx = max(1, int(math.ceil((x1 - x0) / cell)))
+    ny = max(1, int(math.ceil((y1 - y0) / cell)))
+    gx = x0 + (np.arange(nx) + 0.5) * cell
+    gy = y0 + (np.arange(ny) + 0.5) * cell
+    X, Y = np.meshgrid(gx, gy)
+
+    inside_site = point_in_polygon_mask(X, Y, site_pts)
+    outside_all_buildings = np.ones_like(inside_site)
+    for corners in building_corners_list:
+        outside_all_buildings &= ~point_in_polygon_mask(X, Y, corners)
+    mask = inside_site & outside_all_buildings
+    residual_area = float(mask.sum()) * cell * cell
+
+    area_cells, _c0, _r0, w_cells, h_cells = max_inscribed_rectangle(mask)
+    return {
+        "area": area_cells * cell * cell,
+        "min_side": min(w_cells, h_cells) * cell,
+        "residual_area": residual_area,
+    }
 
 
 def interior_seed_point(poly: Sequence[Point]) -> Optional[Point]:

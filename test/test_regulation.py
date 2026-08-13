@@ -30,6 +30,10 @@ def test_hikage_rule_none_outside_the_six_categories():
     assert regulation.hikage_rule("2中高", 200) is None  # 同上
 
 
+def test_min_regulated_mh_is_smallest_table_value():
+    assert regulation.min_regulated_mh() == 4.0
+
+
 def test_jukyo_and_zname_match_html():
     assert regulation.JUKYO == ["1中高", "2中高", "1住", "2住", "準住"]
     assert set(regulation.ZNAME) == {

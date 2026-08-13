@@ -59,6 +59,33 @@ def test_shadow_bands_negligible_effective_height_casts_no_far_shadow():
     assert bands["max_10plus"] == 0.0  # 影は境界(30m)を越えて10m超帯まで届かない
 
 
+def test_bands_from_raster_mask_restricts_to_polygon():
+    # 「影が落ちる先の区域」（法56条の2第4項）はマスク（対象区域の
+    # ポリゴン）の中にしか適用されない、という不具合修正の核心を検証する。
+    # 冬至日は太陽が南寄りにあるため、影は北側(+y)に伸びる。南側だけを
+    # マスクすると、影が実際に落ちていない場所しか見ないので0になる。
+    boundary = [(-30.0, -30.0), (30.0, -30.0), (30.0, 30.0), (-30.0, 30.0)]
+    raster = shadow.shadow_raster(0, 0, 10, 10, 0, H=20.0, deemed_boundary=boundary, mh=4.0, dt_minutes=15)
+    assert raster is not None
+    full = shadow.bands_from_raster(raster)
+    assert full["max_10plus"] > 0.0
+
+    south_mask = [(-100.0, -100.0), (100.0, -100.0), (100.0, 0.0), (-100.0, 0.0)]
+    south_only = shadow.bands_from_raster(raster, mask_polygon=south_mask)
+    assert south_only["max_5_10"] == 0.0
+    assert south_only["max_10plus"] == 0.0
+
+    north_mask = [(-100.0, 0.0), (100.0, 0.0), (100.0, 100.0), (-100.0, 100.0)]
+    north_only = shadow.bands_from_raster(raster, mask_polygon=north_mask)
+    assert math.isclose(north_only["max_10plus"], full["max_10plus"])
+
+
+def test_shadow_raster_none_when_building_below_measurement_height():
+    boundary = [(-50.0, -50.0), (50.0, -50.0), (50.0, 50.0), (-50.0, 50.0)]
+    assert shadow.shadow_raster(0, 0, 20, 20, 0, H=3.0, deemed_boundary=boundary, mh=4.0) is None
+    assert shadow.bands_from_raster(None) == {"max_5_10": 0.0, "max_10plus": 0.0}
+
+
 def test_shadow_reach_distance_matches_design_formula():
     # 設計書3.5-1: 有効高さ×6.71 (北緯35度、冬至日8時・16時付近が最大倍率)
     d = shadow.shadow_reach_distance(10.0, phi_deg=35.0)

@@ -243,6 +243,92 @@ def test_rectangle_for_aspect_ratio_none_when_seed_outside():
     assert rect is None
 
 
+def test_inward_distance_within_span_matches_perpendicular_line_distance():
+    # 射影が辺の区間内に収まる通常のケースでは、境界線までの符号付き垂直距離。
+    edge_a, edge_b = (0.0, 0.0), (0.0, 10.0)
+    direction, normal = (0.0, 1.0), (1.0, 0.0)
+    d = geo.inward_distance((0.5, 5.0), edge_a, edge_b, direction, normal)
+    assert math.isclose(d, -0.5)
+
+
+def test_inward_distance_beyond_span_uses_endpoint_not_extended_line():
+    # 凹んだ敷地で発見された不具合の再現: 射影が辺の区間外に出る点は、
+    # 境界線（延長した直線）までの垂直距離ではなく、辺の端点までの実距離
+    # を使うべき。延長線を使うと、辺から40m離れた点なのに距離0.01と
+    # 誤って計算されてしまっていた。
+    edge_a, edge_b = (10.0, 0.0), (10.0, -1.0)
+    direction, normal = (0.0, -1.0), (-1.0, 0.0)
+    far_point = (10.01, 40.0)
+    d = geo.inward_distance(far_point, edge_a, edge_b, direction, normal)
+    assert math.isclose(d, math.hypot(0.01, 40.0), rel_tol=1e-6)
+    assert d > 39.0  # 旧実装は 0.01 を返していた（延長線への垂直距離）
+
+
+# --- ver0.2.0で追加: アンカー配置・有効空地スコア用のジオメトリ ---
+
+
+def test_local_bounding_box_matches_world_at_zero_rotation():
+    site = [(0.0, 0.0), (60.0, 0.0), (60.0, 40.0), (0.0, 40.0)]
+    umin, umax, vmin, vmax = geo.local_bounding_box(site, 0.0)
+    assert (umin, umax, vmin, vmax) == (0.0, 60.0, 0.0, 40.0)
+
+
+def test_local_bounding_box_matches_rectangle_corners_handedness():
+    # local_bounding_box の (u,v) は rectangle_corners() と同じ向きでなければ
+    # ならない: ある回転角でぴったり内接する矩形の bbox を local_bounding_box
+    # で取り、その中心を local_to_world_center で world に戻すと、
+    # rectangle_corners() で作った矩形の頂点が元のpolyの頂点と一致するはず。
+    for rot in (17.0, 33.0, 61.0):
+        site = geo.rectangle_corners(5.0, -3.0, 40.0, 20.0, rot)
+        umin, umax, vmin, vmax = geo.local_bounding_box(site, rot)
+        assert math.isclose(umax - umin, 40.0, abs_tol=1e-6)
+        assert math.isclose(vmax - vmin, 20.0, abs_tol=1e-6)
+        cx, cy = geo.local_to_world_center((umin + umax) / 2, (vmin + vmax) / 2, rot)
+        assert math.isclose(cx, 5.0, abs_tol=1e-6)
+        assert math.isclose(cy, -3.0, abs_tol=1e-6)
+
+
+def test_max_inscribed_rectangle_full_grid():
+    mask = np.ones((4, 5), dtype=bool)
+    area, col0, row0, w, h = geo.max_inscribed_rectangle(mask)
+    assert area == 20
+    assert (w, h) == (5, 4)
+    assert (col0, row0) == (0, 0)
+
+
+def test_max_inscribed_rectangle_finds_largest_sub_block():
+    mask = np.zeros((5, 5), dtype=bool)
+    mask[1:4, 0:4] = True  # 3行×4列の塊 (area=12) が最大
+    mask[0, 4] = True
+    mask[4, 4] = True
+    area, col0, row0, w, h = geo.max_inscribed_rectangle(mask)
+    assert area == 12
+    assert (col0, row0, w, h) == (0, 1, 4, 3)
+
+
+def test_max_inscribed_rectangle_empty_mask():
+    mask = np.zeros((3, 3), dtype=bool)
+    assert geo.max_inscribed_rectangle(mask) == (0, 0, 0, 0, 0)
+
+
+def test_effective_open_space_no_building_is_full_site():
+    site = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)]
+    result = geo.effective_open_space(site, [], cell=0.5)
+    assert math.isclose(result["area"], 200.0, rel_tol=0.02)
+    assert math.isclose(result["min_side"], 10.0, rel_tol=0.05)
+    assert math.isclose(result["residual_area"], 200.0, rel_tol=0.02)
+
+
+def test_effective_open_space_building_at_one_end_leaves_rest_open():
+    site = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)]
+    # 建物が西側 0..8m を占める -> 残りの東側 8..20m x 10m (12x10=120) が空地
+    building = [(0.0, 0.0), (8.0, 0.0), (8.0, 10.0), (0.0, 10.0)]
+    result = geo.effective_open_space(site, [building], cell=0.5)
+    assert math.isclose(result["area"], 120.0, rel_tol=0.02)
+    assert math.isclose(result["min_side"], 10.0, rel_tol=0.05)
+    assert math.isclose(result["residual_area"], 120.0, rel_tol=0.02)
+
+
 def test_rectangle_for_aspect_ratio_matches_rectangle_corners_handedness():
     """回帰テスト: rectangle_for_aspect_ratio の内部で使う軸(u,v)は、
     rectangle_corners()（HTMLのcorners(b)を移植したもの、W軸=(cos,-sin)・

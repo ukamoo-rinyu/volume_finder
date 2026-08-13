@@ -23,6 +23,7 @@ class SearchTask(QgsTask):
         self.bcr = bcr
         self.params = params
         self.results = []
+        self.pool = []  # search()のpool_out: 正規化済みスコア付きの候補プール（重み変更時の再ランキング用）
         self.exception = None
 
     def run(self):
@@ -35,6 +36,7 @@ class SearchTask(QgsTask):
             self.results = srch.search(
                 self.site_pts, self.edges, self.zone, self.far, self.bcr,
                 params=self.params, progress_callback=progress_cb, should_stop=self.isCanceled,
+                pool_out=self.pool,
             )
             return True
         except Exception as e:  # noqa: BLE001 - 例外はUI側に伝えて表示する

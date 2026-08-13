@@ -45,6 +45,18 @@ def hikage_rule(zone: str, far: float) -> Optional[Dict[str, float]]:
     return _HIKAGE_TABLE.get((zone, int(far)))
 
 
+def min_regulated_mh() -> float:
+    """大阪市の日影規制6区分のうち、測定面高さ(mh)の最小値。
+
+    影の到達範囲（設計書3.5、有効高さ×6.71）を、影を受ける側の区分の
+    mhがまだ分からない段階（用途地域取得時、周辺A29を検索する前）で
+    見積もるときに使う。mhが小さいほど「有効高さ＝建物高さ－mh」が
+    大きくなり到達範囲も広がるため、最小値を使うのが安全側（届く
+    可能性のある区域を見逃さない）になる。
+    """
+    return min(rule["mh"] for rule in _HIKAGE_TABLE.values())
+
+
 def strictest_hikage(candidates: Sequence[Tuple[str, float]]) -> Optional[Tuple[str, float, Dict[str, float]]]:
     """複数区分にまたがる敷地で、日影規制の対象となる区分のうち最も厳しいものを選ぶ。
 

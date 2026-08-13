@@ -22,6 +22,9 @@ A29レイヤは、あらかじめQGISプロジェクトに読み込まれてい�
 レイヤ読み込みに委ね、本プラグインでは扱わない）。
 """
 
+import hashlib
+import json
+import math
 import os
 
 from qgis.core import (
@@ -33,8 +36,10 @@ from qgis.core import (
     QgsMapLayerProxyModel,
     QgsPointXY,
     QgsProject,
+    QgsSettings,
 )
 from qgis.gui import QgsMapLayerComboBox
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -43,12 +48,15 @@ from qgis.PyQt.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -91,18 +99,40 @@ BCR_RELAX_LABELS = [
 
 TARGET_CRS = "EPSG:6674"
 AREA_WARN_RATIO = 0.005  # 0.5% (設計書 2.1.1)
+
+# 境界線の条件（辺ごとの接する状況・幅員）を敷地の形状ごとに永続化する
+# QgsSettings のキー接頭辞。QGISを再起動しても残る（レジストリ／iniファイル
+# にQGIS本体が書き込む場所へ保存されるため）。敷地の識別はレイヤ・地物IDでは
+# なく形状の指紋（_site_fingerprint）で行うので、別レイヤから選び直したり
+# 手描きし直したりしても、同じ形であれば前回の入力を思い出せる。
+EDGE_MEMORY_SETTINGS_GROUP = "volume_finder/edge_memory"
+EDGE_MEMORY_ROUND_M = 0.1  # 指紋計算時の座標丸め(m)。この程度のクリック誤差は同一視する
 SETBACK_MIN_ROAD_WIDTH = 4.0
 SETBACK_MIN_FRONTAGE = 2.0
 
 # 計算精度プリセット（設計書4.1「計算精度」）。標準を既定にする。
-# aspect_ratios/shrink_factorsは精度によらず固定し、日影の時間刻みと
-# 格子解像度の目安(max_grid_span)だけを変える。
+# 平面形の候補生成（size_fractions/anchors）は精度によらず固定し、
+# 日影の時間刻みと格子解像度の目安(max_grid_span)だけを変える。
 PRECISION_PRESETS = {
     "粗い（速い）": {"shadow_dt_minutes": 15.0, "max_grid_span": 80.0},
     "標準": {"shadow_dt_minutes": 5.0, "max_grid_span": 150.0},
     "精密（遅い）": {"shadow_dt_minutes": 2.0, "max_grid_span": 250.0},
 }
 ROTATION_STEP_CHOICES = [5.0, 10.0, 15.0, 30.0, 45.0]
+
+# 回転角モード (ver0.2.0仕様1章)。既定は「境界線平行」。
+ROTATION_MODE_CHOICES = [
+    ("edge", "境界線平行（既定）"),
+    ("orthogonal", "直交のみ（主要接道辺）"),
+    ("free", "自由（比較用）"),
+]
+
+# アンカー配置 (ver0.2.0仕様2章)。既定はすべてON。
+ANCHOR_CHOICES = [(k, srch.ANCHOR_LABELS[k]) for k in srch.ANCHOR_KEYS]
+
+# 評価の重み (ver0.2.0仕様3.7章) のスライダー既定値。
+WEIGHT_DEFAULTS = {"far": 50, "open": 30, "light": 5, "impact": 0}
+WEIGHT_LABELS = {"far": "容積消化率", "open": "有効空地", "light": "南面採光", "impact": "隣地影響"}
 
 
 def _largest_polygon_ring(geom):
@@ -142,17 +172,22 @@ class VolumeFinderDock(QDockWidget):
         self._site_warnings = []
         self._source_layer_name = None
         self._source_fids = []
-        self._last_edges = None  # 前回値の引き継ぎ用 (設計書 2.3-3)
+        self._last_edges = None  # 前回値の引き継ぎ用 (設計書 2.3-3、同一セッション内でのみ有効)
+        self._current_edge_fingerprint = None  # QGIS再起動をまたいだ記憶のキー。敷地未取得ならNone
 
         self._zone_results = []  # [{"zone_key","name","far","bcr","area"}, ...]
         self._zone_warnings = []
         self._far_prorated = None
         self._bcr_prorated = None
-        self._shadow_strictest = None  # (zone_key, far, rule) or None
-        self._shadow_target_zones = []  # 設計書3.5: 影の到達範囲にある対象区域 [{"zone_key","name","far"}, ...]
+        self._shadow_strictest = None  # (zone_key, far, rule) or None。JSON書き出し(HTML表示)用の代表値
+        self._shadow_target_zones = []  # 設計書3.5: 影の到達範囲にある対象区域 [{"zone_key","name","far","polygon"}, ...]
+        self._hikage_regions = []  # 探索用: [{"mask","rule","name"}, ...]（core.search.SearchParams.hikage_regions）
+
+        self._site_area = 0.0
 
         self._search_task = None
-        self._search_results = []  # List[core.search.Candidate]
+        self._search_results = []  # List[core.search.Candidate]（類似解間引き後の表示用）
+        self._search_pool = []  # List[core.search.Candidate]（正規化済み・重み変更時の再ランキング用）
 
         self._build_ui()
 
@@ -210,22 +245,26 @@ class VolumeFinderDock(QDockWidget):
         for key, label in ZONE_LABELS:
             self.zone_combo.addItem(label, key)
         self.zone_combo.setCurrentIndex([k for k, _ in ZONE_LABELS].index("1住"))
+        self.zone_combo.currentIndexChanged.connect(lambda _=None: self._invalidate_search_results("用途地域"))
         zone_manual_form.addRow("用途地域（JSON出力用・手動確認/上書き可）", self.zone_combo)
         self.far_spin = QSpinBox()
         self.far_spin.setRange(50, 1300)
         self.far_spin.setSingleStep(50)
         self.far_spin.setValue(200)
         self.far_spin.setSuffix(" %")
+        self.far_spin.valueChanged.connect(lambda _=None: self._invalidate_search_results("按分容積率"))
         zone_manual_form.addRow("按分容積率", self.far_spin)
         self.bcr_spin = QSpinBox()
         self.bcr_spin.setRange(30, 100)
         self.bcr_spin.setSingleStep(10)
         self.bcr_spin.setValue(60)
         self.bcr_spin.setSuffix(" %")
+        self.bcr_spin.valueChanged.connect(lambda _=None: self._invalidate_search_results("按分建蔽率"))
         zone_manual_form.addRow("按分建蔽率", self.bcr_spin)
         self.bcr_relax_combo = QComboBox()
         for key, label in BCR_RELAX_LABELS:
             self.bcr_relax_combo.addItem(label, key)
+        self.bcr_relax_combo.currentIndexChanged.connect(lambda _=None: self._invalidate_search_results("建蔽率の緩和"))
         zone_manual_form.addRow("建蔽率の緩和", self.bcr_relax_combo)
         zone_layout.addLayout(zone_manual_form)
         layout.addWidget(zone_box)
@@ -234,7 +273,13 @@ class VolumeFinderDock(QDockWidget):
         edge_layout = QVBoxLayout(edge_box)
         self.edge_table = EdgeTable()
         self.edge_table.edgesChanged.connect(self._update_setback_check)
+        self.edge_table.edgesChanged.connect(self._persist_current_edges)
+        self.edge_table.edgesChanged.connect(lambda: self._invalidate_search_results("境界線の条件"))
         edge_layout.addWidget(self.edge_table)
+        self.edge_memory_label = QLabel("")
+        self.edge_memory_label.setStyleSheet("color:#666;font-size:11px;")
+        self.edge_memory_label.setWordWrap(True)
+        edge_layout.addWidget(self.edge_memory_label)
         self.setback_label = QLabel("")
         edge_layout.addWidget(self.setback_label)
         layout.addWidget(edge_box)
@@ -268,11 +313,15 @@ class VolumeFinderDock(QDockWidget):
         self.max_floors_spin.setRange(1, 60)
         self.max_floors_spin.setValue(20)
         search_form.addRow("階数上限", self.max_floors_spin)
+        self.rotation_mode_combo = QComboBox()
+        for key, label in ROTATION_MODE_CHOICES:
+            self.rotation_mode_combo.addItem(label, key)
+        search_form.addRow("回転角モード", self.rotation_mode_combo)
         self.rotation_step_combo = QComboBox()
         for step in ROTATION_STEP_CHOICES:
             self.rotation_step_combo.addItem(f"{step:.0f}°", step)
         self.rotation_step_combo.setCurrentIndex(ROTATION_STEP_CHOICES.index(15.0))
-        search_form.addRow("回転角の刻み", self.rotation_step_combo)
+        search_form.addRow("回転角の刻み（「自由」のときのみ）", self.rotation_step_combo)
         self.precision_combo = QComboBox()
         for label in PRECISION_PRESETS:
             self.precision_combo.addItem(label)
@@ -280,10 +329,30 @@ class VolumeFinderDock(QDockWidget):
         search_form.addRow("計算精度", self.precision_combo)
         self.max_results_spin = QSpinBox()
         self.max_results_spin.setRange(1, 20)
-        self.max_results_spin.setValue(3)
+        self.max_results_spin.setValue(8)
+        self.max_results_spin.valueChanged.connect(self._on_weight_changed)
         search_form.addRow("表示件数", self.max_results_spin)
+        self.dedupe_threshold_spin = QDoubleSpinBox()
+        self.dedupe_threshold_spin.setRange(0, 100)
+        self.dedupe_threshold_spin.setDecimals(1)
+        self.dedupe_threshold_spin.setValue(10.0)
+        self.dedupe_threshold_spin.setSuffix(" m")
+        self.dedupe_threshold_spin.valueChanged.connect(self._on_weight_changed)
+        search_form.addRow("類似解の間引き距離", self.dedupe_threshold_spin)
         search_box_layout = QVBoxLayout(search_box)
         search_box_layout.addLayout(search_form)
+
+        anchor_label = QLabel("配置するアンカー（寄せ方向、複数選択可）")
+        anchor_label.setWordWrap(True)
+        search_box_layout.addWidget(anchor_label)
+        anchor_grid = QGridLayout()
+        self.anchor_checks = {}
+        for i, (key, label) in enumerate(ANCHOR_CHOICES):
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            self.anchor_checks[key] = cb
+            anchor_grid.addWidget(cb, i // 3, i % 3)
+        search_box_layout.addLayout(anchor_grid)
 
         btn_row = QVBoxLayout()
         self.search_run_btn = QPushButton("探索を実行")
@@ -305,7 +374,34 @@ class VolumeFinderDock(QDockWidget):
         search_box_layout.addWidget(self.search_best_label)
         layout.addWidget(search_box)
 
-        result_box = QGroupBox("⑥ 結果")
+        weight_box = QGroupBox("⑥ 評価の重み（探索し直さず並び替えのみ）")
+        weight_form = QFormLayout(weight_box)
+        weight_note = QLabel("スライダーを動かすと、直前の探索結果の中で並び替えるだけなので、再探索なしで即座に反映されます。")
+        weight_note.setWordWrap(True)
+        weight_form.addRow(weight_note)
+        self.weight_sliders = {}
+        self.weight_value_labels = {}
+        for key in ("far", "open", "light", "impact"):
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 100)
+            slider.setValue(WEIGHT_DEFAULTS[key])
+            slider.valueChanged.connect(self._on_weight_changed)
+            value_label = QLabel(str(WEIGHT_DEFAULTS[key]))
+            value_label.setFixedWidth(28)
+            slider.valueChanged.connect(lambda v, lbl=value_label: lbl.setText(str(v)))
+            hrow = QHBoxLayout()
+            hrow.addWidget(slider)
+            hrow.addWidget(value_label)
+            self.weight_sliders[key] = slider
+            self.weight_value_labels[key] = value_label
+            weight_form.addRow(WEIGHT_LABELS[key], hrow)
+        impact_note = QLabel("「隣地影響」は計算コストが高いため、探索前に0より大きくしておいた場合のみ実測されます。探索後にこのスライダーだけ動かしても差は出ません。")
+        impact_note.setWordWrap(True)
+        impact_note.setStyleSheet("color:#666;font-size:11px;")
+        weight_form.addRow(impact_note)
+        layout.addWidget(weight_box)
+
+        result_box = QGroupBox("⑦ 結果")
         result_layout = QVBoxLayout(result_box)
         self.result_table = ResultTable()
         result_layout.addWidget(self.result_table)
@@ -317,7 +413,7 @@ class VolumeFinderDock(QDockWidget):
         result_layout.addLayout(result_btn_row)
         layout.addWidget(result_box)
 
-        export_box = QGroupBox("⑦ 書き出し")
+        export_box = QGroupBox("⑧ 書き出し")
         export_layout = QVBoxLayout(export_box)
         self.export_btn = QPushButton("JSONで書き出し（HTMLツール用）")
         self.export_btn.clicked.connect(self.export_json)
@@ -342,8 +438,56 @@ class VolumeFinderDock(QDockWidget):
         self.setWidget(scroll)
 
     # ------------------------------------------------------------------
-    # 敷地の取得・整形 (設計書 2.1.1)
+    # 境界線の条件（辺ごとの接する状況・幅員）をQGIS再起動をまたいで記憶する。
+    # 「一度探索を行った敷地について、次回以降も選択状況を覚えている」ため、
+    # レイヤ・地物IDではなく敷地の形状（EPSG:6674座標）そのものを指紋にする
+    # （別レイヤから選び直しても、手描きし直しても同じ形なら思い出せる）。
     # ------------------------------------------------------------------
+    @staticmethod
+    def _site_fingerprint(pts_6674):
+        """敷地形状（CCW正規化済みEPSG:6674座標）から記憶用のキーを作る。
+
+        座標をEDGE_MEMORY_ROUND_M単位に丸めてからハッシュ化することで、
+        クリック位置の数cmのブレを同一の敷地とみなす。頂点の並び順は
+        to_ccw()で常に一定になる（設計書2.1.2）ので、同じ敷地なら
+        再取得しても同じキーになる。
+        """
+        if not pts_6674:
+            return None
+        rounded = [
+            (round(x / EDGE_MEMORY_ROUND_M), round(y / EDGE_MEMORY_ROUND_M))
+            for x, y in pts_6674
+        ]
+        digest = hashlib.sha1(repr(rounded).encode("utf-8")).hexdigest()[:20]
+        return digest
+
+    def _load_persisted_edges(self, fingerprint):
+        if not fingerprint:
+            return None
+        raw = QgsSettings().value(f"{EDGE_MEMORY_SETTINGS_GROUP}/{fingerprint}", None)
+        if not raw:
+            return None
+        try:
+            edges = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(edges, list):
+            return None
+        return edges
+
+    def _persist_current_edges(self):
+        """境界線の条件が変わるたびに、現在の敷地の指紋に紐づけて保存する
+        （設計書2.3-3の「前回値の引き継ぎ」をQGISの再起動をまたいで効かせる）。"""
+        if not self._current_edge_fingerprint:
+            return
+        edges = self.edge_table.edges()
+        if not edges:
+            return
+        QgsSettings().setValue(
+            f"{EDGE_MEMORY_SETTINGS_GROUP}/{self._current_edge_fingerprint}",
+            json.dumps(edges),
+        )
+
     def build_site_from_selection(self):
         layer = self.layer_combo.currentLayer()
         if layer is None:
@@ -404,6 +548,7 @@ class VolumeFinderDock(QDockWidget):
         self._source_fids = [f.id() for f in feats]
 
         area_m2 = geo.polygon_area(pts_ccw)
+        self._site_area = area_m2
         self.area_label.setText(f"{area_m2:,.1f} m²")
         self.site_warning_label.setText("\n".join(warnings))
 
@@ -420,9 +565,19 @@ class VolumeFinderDock(QDockWidget):
             site_local.append(geo.latlng_to_local(ll_pt.y(), ll_pt.x(), origin_lat, origin_lng))
         self._site_local = site_local
 
+        # QGISを再起動しても、同じ形の敷地なら前回の境界線の条件を思い出す。
+        # 記憶が無い初めての敷地では、同一セッション内の前回値(_last_edges)に
+        # フォールバックする（設計書2.3-3）。
+        self._current_edge_fingerprint = self._site_fingerprint(pts_ccw)
+        persisted_edges = self._load_persisted_edges(self._current_edge_fingerprint)
         edge_geoms = geo.polygon_edges(pts_ccw)
-        self.edge_table.set_edges(edge_geoms, initial_edges=self._last_edges)
+        self.edge_table.set_edges(edge_geoms, initial_edges=persisted_edges or self._last_edges)
         self._last_edges = None
+        self.edge_memory_label.setText(
+            "この敷地は以前入力した接する状況・幅員を記憶しています（自動反映済み）。"
+            if persisted_edges else ""
+        )
+        self._invalidate_search_results()  # 敷地が変わったので、古い敷地に対する探索結果は無効
 
         self.export_btn.setEnabled(True)
         self.search_run_btn.setEnabled(True)
@@ -521,8 +676,23 @@ class VolumeFinderDock(QDockWidget):
         # 基準が適用される。HTMLツールでは周辺のデータを持てず断念して
         # いた項目（GISだからこそ実現できる）。
         target_zones = []
-        max_h = self.max_floors_spin.value() * self.floor_height_spin.value()
-        reach = sh.shadow_reach_distance(max_h)
+        # 影の到達範囲の見積もりに使う高さ。探索条件の「階数上限」は探索が
+        # 試す上限（既定20階）であって実際に建つ高さの見積もりではないため、
+        # そのまま使うと現実離れした広い範囲を拾ってしまう（実例:
+        # 9,150m²・容積率300%の敷地で階数上限20階のまま計算すると到達範囲
+        # 469mになり、明らかに影が届かない遠方の区域まで拾ってしまって
+        # いた）。按分容積率・按分建蔽率から「指定建蔽率いっぱいに建てた
+        # ときに容積を使い切る階数」（= far/bcr、建築実務でよく使う目安）を
+        # 求め、階数上限とのいずれか小さい方を高さの見積もりに使う。
+        # 有効高さ（設計書3.5）は建物高さ－測定面高さ(mh)なので、mhは
+        # 影を受ける側の区分がまだ分からないこの時点では最小値
+        # （regulation.min_regulated_mh、大阪市6区分でmh=4m）を使い、
+        # 到達範囲を狭めすぎない（安全側）ようにする。
+        est_floors = math.ceil(far_prorated / bcr_prorated) if bcr_prorated > 0 else self.max_floors_spin.value()
+        est_floors = max(1, min(est_floors, self.max_floors_spin.value()))
+        est_height = est_floors * self.floor_height_spin.value()
+        effective_height = max(0.0, est_height - reg.min_regulated_mh())
+        reach = sh.shadow_reach_distance(effective_height)
         if reach > 0:
             buffered = site_geom.buffer(reach, 8)
             buffered_in_a29_crs = QgsGeometry(buffered)
@@ -550,9 +720,27 @@ class VolumeFinderDock(QDockWidget):
                 seen.add((zkey, far_num))
                 if reg.hikage_rule(zkey, far_num):
                     distance = site_geom.distance(g)
-                    target_zones.append({"zone_key": zkey, "name": name, "far": far_num, "distance": distance})
+                    target_zones.append({
+                        "zone_key": zkey, "name": name, "far": far_num, "distance": distance,
+                        # 探索でのマスク用（設計書3.5・ver0.2.0）: この区域の実際の
+                        # ポリゴン全体（敷地との交差ではなく、区域そのもの）。
+                        # 影がこのポリゴンの中に実際に落ちている部分だけを判定に使う。
+                        "polygon": _largest_polygon_ring(g),
+                    })
 
         self._shadow_target_zones = target_zones
+        # 探索用: 「影が落ちる先の区域」は、それぞれの実際のポリゴン（マスク）
+        # の中でしか判定してはいけない（ver0.2.0で修正した不具合。影が実際
+        # には届かない方角にある対象区域まで拾って全周を制約していた）。
+        # 敷地自身の区域の基準は、探索側(core.search._floors_within_shadow)が
+        # candidateごとのlocal_zone/local_farから自動で判定するので、ここに
+        # 含める必要はない。
+        self._hikage_regions = [
+            {"mask": z["polygon"], "rule": reg.hikage_rule(z["zone_key"], z["far"]), "name": reg.ZNAME.get(z["zone_key"], z["name"])}
+            for z in target_zones
+            if z.get("polygon")
+        ]
+
         all_shadow_candidates = shadow_candidates + [(z["zone_key"], z["far"]) for z in target_zones]
         strictest = reg.strictest_hikage(all_shadow_candidates)
 
@@ -560,34 +748,42 @@ class VolumeFinderDock(QDockWidget):
         self._zone_warnings = warnings
         self._far_prorated = far_prorated
         self._bcr_prorated = bcr_prorated
-        self._shadow_strictest = strictest
+        self._shadow_strictest = strictest  # JSON書き出し(HTML表示)用の代表値。探索は_hikage_regionsを使う
 
         lines = []
         for r in sorted(results, key=lambda r: -r["area"]):
             label = reg.ZNAME.get(r["zone_key"], r["name"])
             lines.append(f"{label}　{r['far']:.0f}%　{r['bcr']:.0f}%　{r['area']:,.1f}m²")
         lines.append(f"按分容積率 {far_prorated:.1f}%　按分建蔽率 {bcr_prorated:.1f}%")
-        distinct_regulated = {(z, f) for z, f in all_shadow_candidates if reg.hikage_rule(z, f)}
-        site_own_regulated = {(z, f) for z, f in shadow_candidates if reg.hikage_rule(z, f)}
-        if strictest:
-            zone_key, far, rule = strictest
-            extra = f"（他{len(distinct_regulated) - 1}区分あり、厳しい方を採用）" if len(distinct_regulated) > 1 else ""
-            from_target = (zone_key, far) not in site_own_regulated
-            source_note = "影が落ちる先の区域（法56条の2第4項）" if from_target else "敷地自身の区域"
-            lines.append(
-                f"日影規制：{reg.ZNAME.get(zone_key, zone_key)}(容積率{far:.0f}%)の基準"
-                f" mh={rule['mh']}m t1={rule['t1']}分 t2={rule['t2']}分 を採用{extra}　[{source_note}]"
-            )
-            if target_zones:
-                names = "、".join(sorted({reg.ZNAME.get(z["zone_key"], z["name"]) for z in target_zones}))
-                lines.append(f"（影の到達範囲 約{reach:.0f}m以内に対象区域あり：{names}）")
-        elif target_zones:
-            # ここには来ないはず（target_zonesはhikage_rule判定済みのみ格納）だが念のため
-            lines.append("日影規制：周辺に対象区域がありますが基準を決定できませんでした。")
+
+        # 日影規制の内訳は、敷地自身の区域（全周に適用）と、影が落ちる先の
+        # 各対象区域（それぞれの実際の範囲内だけに適用）を分けて列挙する。
+        # 「厳しい方を採用」と1本にまとめてしまうと、対象区域が敷地の一部
+        # 方角にしかない場合でも全方位に規制がかかっているかのように誤解
+        # されるため（実際に見つかった不具合）。
+        site_own_regulated = sorted({(z, f) for z, f in shadow_candidates if reg.hikage_rule(z, f)})
+        if site_own_regulated:
+            for zone_key, far in site_own_regulated:
+                rule = reg.hikage_rule(zone_key, far)
+                lines.append(
+                    f"日影規制：{reg.ZNAME.get(zone_key, zone_key)}(容積率{far:.0f}%)の基準"
+                    f" mh={rule['mh']}m t1={rule['t1']}分 t2={rule['t2']}分（敷地自身の区域、全周に適用）"
+                )
         else:
+            lines.append("日影規制：敷地自身の区域は対象外です。")
+        if target_zones:
+            for z in sorted(target_zones, key=lambda z: z["distance"]):
+                rule = reg.hikage_rule(z["zone_key"], z["far"])
+                mask_note = "" if z.get("polygon") else "　⚠区域の形状が取得できずマスクなし（全周に適用）"
+                lines.append(
+                    f"日影規制：{reg.ZNAME.get(z['zone_key'], z['name'])}(容積率{z['far']:.0f}%)の基準"
+                    f" mh={rule['mh']}m t1={rule['t1']}分 t2={rule['t2']}分"
+                    f"（影が落ちる先の区域、法56条の2第4項、約{z['distance']:.0f}m先、その区域の範囲内だけに適用{mask_note}）"
+                )
+            lines.append(f"（影の到達範囲 約{reach:.0f}m以内を検索）")
+        elif not site_own_regulated:
             lines.append(
-                "日影規制：敷地・周辺（影の到達範囲内）とも対象区域が見つかりません"
-                "（大阪市の6区分外、または未判定の区分あり）。"
+                "（影の到達範囲 約{:.0f}m以内にも対象区域が見つかりません。大阪市の6区分外、または未判定の区分あり）".format(reach)
             )
         self.zone_result_label.setText("\n".join(lines))
         self.zone_warning_label.setText("\n".join(warnings))
@@ -619,7 +815,6 @@ class VolumeFinderDock(QDockWidget):
             return
 
         preset = PRECISION_PRESETS[self.precision_combo.currentText()]
-        shadow_override = self._shadow_strictest[2] if self._shadow_strictest else None
 
         # 設計書3.6「複数用途地域」: 用途地域・斜線は按分できないため、A29と
         # 敷地の交差領域を候補ごとの重心判定に使う（core.search._local_zone）。
@@ -649,17 +844,29 @@ class VolumeFinderDock(QDockWidget):
             )
             return
 
+        anchors = [key for key, cb in self.anchor_checks.items() if cb.isChecked()]
+        if not anchors:
+            QMessageBox.warning(self, "探索", "アンカーを少なくとも1つ選択してください。")
+            return
+
         params = srch.SearchParams(
             min_setback=min_setback,
             buildable_override=buildable,
             floor_height=self.floor_height_spin.value(),
             max_floors=self.max_floors_spin.value(),
+            rotation_mode=self.rotation_mode_combo.currentData(),
             rotation_step_deg=float(self.rotation_step_combo.currentData()),
+            anchors=anchors,
             shadow_dt_minutes=preset["shadow_dt_minutes"],
             shadow_cell=None,
             bcr_relax=self.bcr_relax_combo.currentData(),
             max_results=self.max_results_spin.value(),
-            hikage_override=shadow_override,
+            dedupe_threshold=self.dedupe_threshold_spin.value(),
+            weight_far=self.weight_sliders["far"].value(),
+            weight_open=self.weight_sliders["open"].value(),
+            weight_light=self.weight_sliders["light"].value(),
+            weight_impact=self.weight_sliders["impact"].value(),
+            hikage_regions=self._hikage_regions or None,
             zone_regions=zone_regions or None,
         )
         zone_key = self.zone_combo.currentData()
@@ -704,14 +911,63 @@ class VolumeFinderDock(QDockWidget):
             return
 
         self._search_results = task.results
+        self._search_pool = task.pool  # 重み変更時に再探索なしで並び替えるためのプール（仕様3.7）
         self.result_table.set_results(self._search_results)
         self.export_layer_btn.setEnabled(bool(self._search_results))
         if self._search_results:
             best = self._search_results[0]
-            self.search_progress_label.setText(f"完了：候補 {len(self._search_results)} 件")
+            self.search_progress_label.setText(f"完了：候補 {len(self._search_results)} 件（プール {len(self._search_pool)} 件）")
             self.search_best_label.setText(f"最良案：{best.floors}階 延床 {best.floor_area:,.0f}m²")
         else:
             self.search_progress_label.setText("完了：条件を満たす候補が見つかりませんでした")
+
+    def _on_weight_changed(self, *_args):
+        """評価の重みスライダーの変更（仕様3.7「重み変更時はソートし直すだけ」）。
+
+        直前の探索で得たプール（self._search_pool、正規化済みの指標を持つ）を
+        使って並び替え・類似解間引きをやり直すだけで、core.search.search() は
+        呼ばない。プールが無ければ（まだ探索していない）何もしない。
+        """
+        if not self._search_pool:
+            return
+        weights = {
+            "far": self.weight_sliders["far"].value(),
+            "open": self.weight_sliders["open"].value(),
+            "light": self.weight_sliders["light"].value(),
+            "impact": self.weight_sliders["impact"].value(),
+        }
+        self._search_results = srch.rerank(
+            self._search_pool, weights, self._site_area,
+            dedupe_threshold=self.dedupe_threshold_spin.value(),
+            max_results=self.max_results_spin.value(),
+        )
+        self.result_table.set_results(self._search_results)
+        self.export_layer_btn.setEnabled(bool(self._search_results))
+        if self._search_results:
+            best = self._search_results[0]
+            self.search_best_label.setText(f"最良案：{best.floors}階 延床 {best.floor_area:,.0f}m²")
+
+    def _invalidate_search_results(self, reason=None):
+        """探索条件（用途地域・容積率・建蔽率・境界条件・敷地）が変わったら、
+        古い探索結果を保持し続けない。
+
+        実際に見つかった不具合の再現: 「用途地域を取得」で按分容積率・
+        按分建蔽率が更新されても（例: 200%→300%）、それより前に行った
+        探索結果は古い値（200%）のまま画面・レイヤ・JSON出力に残り続け、
+        現在表示されている按分値と食い違う案を、それと気づかずに書き出して
+        しまっていた。重み・表示件数・類似解間引き距離の変更は再探索
+        不要なので、ここでは呼ばない（_on_weight_changed / core.search.rerank
+        を使う）。
+        """
+        if not self._search_results and not self._search_pool:
+            return  # まだ探索していない、またはすでに無効化済み（連続呼び出しの無駄打ちを防ぐ）
+        self._search_results = []
+        self._search_pool = []
+        self.result_table.set_results([])
+        self.export_layer_btn.setEnabled(False)
+        prefix = f"{reason}が変更されたため、" if reason else ""
+        self.search_progress_label.setText(f"{prefix}直前の探索結果は無効になりました。再探索してください。")
+        self.search_best_label.setText("")
 
     def export_results_layer(self):
         if not self._search_results:
@@ -842,7 +1098,10 @@ class VolumeFinderDock(QDockWidget):
                     for z in self._shadow_target_zones
                 )
                 qgis_extra["shadow_zones"] = shadow_zones
-                qgis_extra["shadow_applied"] = {"name": reg.ZNAME.get(sk, sk), "far": sfar, **srule}
+                qgis_extra["shadow_applied"] = {
+                    "name": reg.ZNAME.get(sk, sk), "far": sfar, **srule,
+                    "from_target": (sk, sfar) not in own_zone_pairs,  # 設計書3.5: 影が落ちる先の区域の基準か
+                }
         if candidate is not None:
             qgis_extra["rank"] = candidate.rank
             qgis_extra["binding"] = candidate.binding

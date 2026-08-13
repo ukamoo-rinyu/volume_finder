@@ -1,8 +1,11 @@
-"""結果一覧テーブル (設計書 4.1 ⑤結果)。"""
+"""結果一覧テーブル (ver0.2.0仕様3.7の多目的スコアを表示に反映)。"""
 
 from qgis.PyQt.QtWidgets import QHeaderView, QTableWidget, QTableWidgetItem
 
-COLUMNS = ["順位", "階数", "高さ(m)", "建築面積(m²)", "延床面積(m²)", "容積率(%)", "建蔽率(%)", "効いている制約"]
+COLUMNS = [
+    "順位", "スコア", "アンカー", "階数", "高さ(m)", "建築面積(m²)", "延床面積(m²)",
+    "容積率(%)", "建蔽率(%)", "有効空地(m²)", "南面採光", "効いている制約",
+]
 
 
 class ResultTable(QTableWidget):
@@ -19,12 +22,16 @@ class ResultTable(QTableWidget):
         for row, c in enumerate(candidates):
             values = [
                 str(c.rank),
+                f"{c.score:.2f}",
+                c.anchor,
                 f"{c.floors}階",
                 f"{c.height:.1f}",
                 f"{c.footprint_area:,.1f}",
                 f"{c.floor_area:,.1f}",
                 f"{c.far_pct:.1f}",
                 f"{c.bcr_pct:.1f}",
+                f"{c.open_area:,.0f}（短辺{c.open_min_side:.1f}m）",
+                f"{c.light_ratio:.2f}",
                 "・".join(c.binding),
             ]
             for col, v in enumerate(values):

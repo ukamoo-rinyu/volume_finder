@@ -446,6 +446,7 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
     <div class="btnrow"><button class="act mn" id="mnZone">マップナビおおさか（用途地域）を開く</button></div>
     <p class="note"><b style="color:var(--sun)">2つ以上の用途地域にまたがる場合</b>は按分できません。
       検討段階では厳しい側の基準を入力してください。</p>
+    <div id="qgisZoneInfo" class="card" style="display:none"></div>
 
     <h3>敷地の形<button class="q" data-h="draw">?</button></h3>
     <div class="btnrow"><button class="act ghost" id="rect">四角形を自動生成</button><button class="act" id="draw">地図で作図</button></div>
@@ -503,6 +504,7 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
     <div id="jroad" class="card">—</div>
     <div id="jrin" class="card">—</div>
     <div id="jhik" class="card">—</div>
+    <div id="qgisShadowInfo" class="card" style="display:none"></div>
     <h3>この判定の限界<button class="q" data-h="limit">?</button></h3>
     <p class="note">計画初期のあたり付け用です。未考慮の緩和があります。？を押して確認してください。</p>
   </div>
@@ -704,6 +706,7 @@ function bcrLimit(){
 
 /* ===== [5] 状態 ===== */
 let site=null, edges=[], blds=[], sel=-1, lastGrid=null, lastJudge=null;
+let QGIS_META=null;  // volume_finderプラグインが付加した _qgis ブロック（複数用途地域・影が落ちる先の区域など、設計書5.2）。無ければnull。
 const newB=(cx,cy)=>({name:"棟",W:30,D:15,rot:0,cx,cy,fh:3.5,nf:6,ph:0});
 function BG(b){
   const H=b.nf*b.fh+b.ph;
@@ -1364,10 +1367,24 @@ function edgeGeom(i){
   const dx=b[0]-a[0],dy=b[1]-a[1],L2=Math.hypot(dx,dy)||1;
   return {a,b,L:L2,dir:[dx/L2,dy/L2],n:[dy/L2,-dx/L2]};
 }
-const inwardDist=(p,g)=>-((p[0]-g.a[0])*g.n[0]+(p[1]-g.a[1])*g.n[1]);
 /* 後退距離：建築物から前面道路（隣地）の境界線までの水平距離の最小値。
-   境界線は直線として扱い、垂直距離で測る。辺の線分までの距離で測ると、
-   建物が辺の正面から横にずれている場合に斜めの距離になって長く出てしまう。 */
+   pを辺の方向に射影した位置が辺の区間[0,g.L]に収まる場合は、境界線
+   （直線）までの垂直距離で測る。辺の線分までの距離で測ると、建物が辺の
+   正面から横にずれている場合に斜めの距離になって長く出てしまうため。
+   区間の外側に射影される場合は、境界線を延長した直線への垂直距離ではなく
+   辺の端点までの実距離を使う。敷地が凹んでいると、ある辺の境界線を延長
+   した直線が、その辺とは無関係な場所にある頂点をかすめることがあり、
+   延長線への垂直距離だけで測るとその頂点が「辺のすぐそば」であるかの
+   ように後退距離がほぼ0と誤って計算されてしまうため（ver0.2.0で発見・
+   修正。敷地形状が凹んでいる場合に⑤隣地境界までの後退距離が0になる
+   不具合）。 */
+const inwardDist=(p,g)=>{
+  const t=(p[0]-g.a[0])*g.dir[0]+(p[1]-g.a[1])*g.dir[1];
+  if(t>=0&&t<=g.L)return -((p[0]-g.a[0])*g.n[0]+(p[1]-g.a[1])*g.n[1]);
+  const tc=Math.max(0,Math.min(g.L,t));
+  const ex=g.a[0]+g.dir[0]*tc,ey=g.a[1]+g.dir[1]*tc;
+  return Math.hypot(p[0]-ex,p[1]-ey);
+};
 /* 後退距離：その辺の境界線（直線）から、敷地内のすべての建物のうち
    もっとも近い角までの垂直距離。辺ごとに1つだけ決まる。 */
 /* 断面図に描く建物の奥行き。断面はその辺に直角に切るので、
@@ -1786,16 +1803,85 @@ function contour(g,level){
   }
   return segs;
 }
-function hikageJudge(){
+/* 自動判定(autolv)がOFFのときは、zone/farからの自動導出(hikageRule)ではなく
+   mh/lv5/lv3欄の値をそのまま「効いている規制値」として使う。従来は
+   HR(zone/farからの自動導出)が存在する限りhikageJudge()が常にHRを優先して
+   しまい、autolvをOFFにして手入力しても判定に反映されないという食い違いが
+   あった。これは「2つ以上の用途地域にまたがる場合」や「影が落ちる先の
+   区域の基準を採用する場合」など、zone/far1つでは表せない規制値を手動で
+   反映させたい場面（QGISプラグイン連携時にapply()が自動設定する場合を含む、
+   下のrenderQgisMeta参照）でとくに重要。 */
+function effectiveHikageRule(){
   const z=$("zone").value,f=+$("far").value,HR=hikageRule(z,f);
-  const t1=HR?HR.t1:+$("lv5").value,t2=HR?HR.t2:+$("lv3").value;
+  if(!$("autolv").checked){
+    return{mh:+$("mh").value,t1:+$("lv5").value,t2:+$("lv3").value,manual:true,na:false};
+  }
+  if(!HR)return{mh:+$("mh").value,t1:+$("lv5").value,t2:+$("lv3").value,manual:false,na:true};
+  return{mh:HR.mh,t1:HR.t1,t2:HR.t2,manual:false,na:false};
+}
+function hikageJudge(){
+  const ER=effectiveHikageRule(),t1=ER.t1,t2=ER.t2,HRobj=ER.na?null:{mh:ER.mh,t1,t2};
   let hmax=0;blds.forEach(x=>hmax=Math.max(hmax,BG(x).H));
-  if(!HR)return{state:"na",reason:"対象区域外",t1,t2,HR:null};
-  if(hmax<=10)return{state:"na",reason:"対象外（すべて高さ10m以下）",t1,t2,HR};
-  if(!siteArea())return{state:"wait",reason:"敷地が未設定",t1,t2,HR};
-  if(!lastGrid)return{state:"wait",reason:"未計算",t1,t2,HR};
+  if(ER.na)return{state:"na",reason:"対象区域外",t1,t2,HR:null,ER};
+  if(hmax<=10)return{state:"na",reason:"対象外（すべて高さ10m以下）",t1,t2,HR:HRobj,ER};
+  if(!siteArea())return{state:"wait",reason:"敷地が未設定",t1,t2,HR:HRobj,ER};
+  if(!lastGrid)return{state:"wait",reason:"未計算",t1,t2,HR:HRobj,ER};
   const r=lastGrid.band,ok1=r.max1<t1-1e-6,ok2=r.max2<t2-1e-6;
-  return{state:(ok1&&ok2)?"ok":"ng",ok1,ok2,r,t1,t2,HR};
+  return{state:(ok1&&ok2)?"ok":"ng",ok1,ok2,r,t1,t2,HR:HRobj,ER};
+}
+function manualSourceNoteHTML(ER){
+  if(!ER||!ER.manual)return"";
+  const applied=QGIS_META&&QGIS_META.shadow_applied;
+  return `<div class="note" style="margin-top:6px;padding:6px 8px;background:var(--panel-2);border-radius:8px">
+    <b style="color:var(--ink-2)">手動設定の規制値を使用中</b>（自動判定OFF）です。
+    ${applied?`QGISプラグインの判定：<b>${esc(applied.name)}</b>（指定容積率${applied.far}%）の基準を採用`
+      +(applied.from_target?"（<b>影が落ちる先の区域</b>、法56条の2第4項）":"（敷地の用途地域区分のうち最も厳しい基準）")+"。"
+      :"「①敷地」タブの自動判定チェックを外して測定面・時間を手入力しています。"}
+    <button class="q" data-h="hikout" style="margin-left:2px">?</button></div>`;
+}
+/* QGISプラグイン(_qgis)が付加した、複数用途地域の内訳・影が落ちる先の
+   区域の判定を、①敷地タブ・③判定タブの参考カードに表示する。プラグイン
+   経由で開いたJSON/HTMLでなければ(QGIS_METAがnull)何も表示しない。
+   容積率・建蔽率の按分値自体はd.far/d.bcr（zone/far/bcr欄）に既に反映
+   済みなので、ここはあくまで「なぜその数字なのか」の内訳表示。 */
+function renderQgisMeta(){
+  const zEl=$("qgisZoneInfo"),sEl=$("qgisShadowInfo");
+  if(!zEl||!sEl)return;
+  const M=QGIS_META;
+  if(!M||!Array.isArray(M.zones)||!M.zones.length){
+    zEl.style.display="none";zEl.innerHTML="";
+  }else{
+    const rows=M.zones.map(z=>`<tr><td>${esc(z.name)}</td><td>${z.far}%</td><td>${z.bcr}%</td>`
+      +`<td>${z.area.toLocaleString(undefined,{maximumFractionDigits:0})} m²</td></tr>`).join("");
+    const warn=(M.zone_warnings||[]).map(w=>`<div style="color:var(--ng);margin-top:4px">⚠ ${esc(w)}</div>`).join("");
+    zEl.style.display="";
+    zEl.innerHTML=`<div class="ttl"><b>用途地域の内訳</b><span class="badge b-na">QGISプラグイン提供</span></div>
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+        <thead><tr style="color:var(--muted);text-align:left"><th>区分</th><th>容積率</th><th>建蔽率</th><th>面積</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="kv" style="margin-top:6px"><span>按分容積率</span><span><b>${M.far_prorated!=null?M.far_prorated.toFixed(1):"—"}%</b></span></div>
+      <div class="kv"><span>按分建蔽率</span><span><b>${M.bcr_prorated!=null?M.bcr_prorated.toFixed(1):"—"}%</b></span></div>
+      <div class="note">上の「指定容積率・指定建蔽率」欄には、この按分値がすでに反映されています。斜線制限・日影規制は区分ごとの判定が必要で按分できないため、内訳を参考に必要に応じて厳しい側の区分を選び直してください。</div>
+      ${warn}`;
+  }
+
+  if(!M||(!M.shadow_applied&&(!M.shadow_zones||!M.shadow_zones.length))){
+    sEl.style.display="none";sEl.innerHTML="";
+  }else{
+    const applied=M.shadow_applied;
+    const list=(M.shadow_zones||[]).map(z=>`<tr><td>${esc(z.name)}</td><td>${z.far}%</td>`
+      +`<td>${z.t1}h／${z.t2}h</td><td>${z.distance>0?z.distance.toFixed(0)+"m":"敷地自身"}</td></tr>`).join("");
+    sEl.style.display="";
+    sEl.innerHTML=`<div class="ttl"><b>日影規制の基準（QGISプラグイン判定）</b><span class="badge b-na">参考</span></div>`
+      +(applied?`<div class="kv"><span>採用した基準</span><span><b>${esc(applied.name)}</b>（容積率${applied.far}%）</span></div>
+      <div class="kv"><span>由来</span><span>${applied.from_target?"影が落ちる先の区域（法56条の2第4項）":"敷地の用途地域区分のうち最も厳しいもの"}</span></div>`:"")
+      +(list?`<table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px">
+        <thead><tr style="color:var(--muted);text-align:left"><th>区分</th><th>容積率</th><th>規制時間(5-10m／10m超)</th><th>距離</th></tr></thead>
+        <tbody>${list}</tbody></table>`:"")
+      +`<div class="note">「①敷地」タブの自動判定はOFFになっており、上の採用基準（測定面の高さ・規制時間）が手入力欄にすでに反映されています。</div>`
+      +`<div class="note" style="margin-top:4px">QGISプラグイン内部では、対象区域ごとに<b>実際にその区域の土地に影が落ちている範囲だけ</b>で判定しています。ここではその中で最も厳しい基準を全周に一律で表示・適用する簡易表示のため、QGIS側で「適合」と判定された案でも、この画面の再判定では「超過」と出ることがあります。判定が食い違う場合はQGIS側の候補一覧（効いている制約）を優先してください。</div>`;
+  }
 }
 function hikageCardHTML(j,va){
   if(j.state==="na")
@@ -1810,14 +1896,14 @@ function hikageCardHTML(j,va){
            <button class="q" data-h="hikout" style="margin-left:2px">?</button></div>`);
   if(j.state==="wait")
     return `<div class="ttl"><b>日影規制</b><span class="badge b-na">${j.reason}</span></div>
-      <div class="kv"><span>規制（測定面 ${j.HR.mh}m）</span><span>5–10m：${j.t1}時間／10m超：${j.t2}時間</span></div>`;
+      <div class="kv"><span>規制（測定面 ${j.HR.mh}m）</span><span>5–10m：${j.t1}時間／10m超：${j.t2}時間</span></div>${manualSourceNoteHTML(j.ER)}`;
   const ok=j.state==="ok",A=va||{a1:0,a2:0};
   return `<div class="ttl"><b>日影規制</b><span class="badge ${ok?"b-ok":"b-ng"}">${ok?"適合":"超過"}</span></div>
     <div class="kv"><span>測定面の高さ</span><span>${j.HR.mh} m</span></div>
     <div class="kv"><span>5m超10m以内</span><span>規制 ${j.t1}h 未満／最大 <b style="color:${j.ok1?"var(--ok)":"var(--ng)"}">${j.r.max1.toFixed(2)}h</b> ${j.ok1?"✓":"✕"}</span></div>
     ${j.ok1?"":`<div class="kv"><span>　超過面積</span><span style="color:var(--ng)">約 ${A.a1.toFixed(0)} m²</span></div>`}
     <div class="kv"><span>10m超</span><span>規制 ${j.t2}h 未満／最大 <b style="color:${j.ok2?"var(--ok)":"var(--ng)"}">${j.r.max2.toFixed(2)}h</b> ${j.ok2?"✓":"✕"}</span></div>
-    ${j.ok2?"":`<div class="kv"><span>　超過面積</span><span style="color:var(--ng)">約 ${A.a2.toFixed(0)} m²</span></div>`}
+    ${j.ok2?"":`<div class="kv"><span>　超過面積</span><span style="color:var(--ng)">約 ${A.a2.toFixed(0)} m²</span></div>`}${manualSourceNoteHTML(j.ER)}
     <div style="color:var(--muted);margin-top:4px">${ok?"敷地内は測定対象から除外して算定。"
       :'地図の<b style="color:#C0392B">赤</b>＝5m超10m以内、<b style="color:#7B3FA8">紫</b>＝10m超の超過範囲です。'}</div>`;
 }
@@ -1866,19 +1952,19 @@ function drawIso(g){
   $("lg3").textContent=$("lv3").value+"時間 等時間日影線（10m超）";
 }
 function basisText(){
-  const z=$("zone").value,f=+$("far").value,HR=hikageRule(z,f);
-  if(!HR)return `<b>日影規制の対象区域外</b><br>${ZNAME[z]}・指定容積率 ${f}% は対象に含まれません。<br>
+  const ER=effectiveHikageRule(),z=$("zone").value,f=+$("far").value;
+  if(ER.na)return `<b>日影規制の対象区域外</b><br>${ZNAME[z]}・指定容積率 ${f}% は対象に含まれません。<br>
     <b style="color:var(--ng)">ただし、近くの対象区域に日影を落とす場合は規制を受けます</b>（法56条の2第4項）。
     その場合の規制値は<b>影が落ちる側の用途地域</b>のものです。<br>
     <span style="font-size:11px">根拠：建築基準法 第56条の2・別表第4／大阪市建築基準法施行条例</span>`;
   return `<b>${ZNAME[z]}・指定容積率 ${f}%</b> の場合<br>
     ・対象建築物：高さが <b>10m をこえる</b>建築物<br>
-    ・測定面の高さ：<b>${HR.mh} m</b>（平均地盤面から）<br>
-    ・敷地境界線から5mをこえ10m以内：<b>${HR.t1} 時間</b>以上の日影を生じさせない<br>
-    ・敷地境界線から10mをこえる範囲：<b>${HR.t2} 時間</b>以上の日影を生じさせない<br>
+    ・測定面の高さ：<b>${ER.mh} m</b>（平均地盤面から）<br>
+    ・敷地境界線から5mをこえ10m以内：<b>${ER.t1} 時間</b>以上の日影を生じさせない<br>
+    ・敷地境界線から10mをこえる範囲：<b>${ER.t2} 時間</b>以上の日影を生じさせない<br>
     ・測定期間：冬至日の真太陽時 午前8時〜午後4時<br>
     <span style="font-size:11px">根拠：建築基準法 第56条の2・別表第4／大阪市建築基準法施行条例。
-    敷地が道路・水面等に接する場合は令135条の12第3項の境界線緩和を適用しています。</span>`;
+    敷地が道路・水面等に接する場合は令135条の12第3項の境界線緩和を適用しています。</span>${manualSourceNoteHTML(ER)}`;
 }
 function syncLevels(){
   $("basis").innerHTML=basisText();
@@ -2222,6 +2308,18 @@ function apply(d){
   if(c.autolv!=null)$("autolv").checked=c.autolv;
   if(c.lv3)$("lv3").value=c.lv3;if(c.lv5)$("lv5").value=c.lv5;
   if(c.base&&(c.base in bases)){$("base").value=c.base;setBase(c.base);}
+  QGIS_META=d._qgis||null;
+  if(QGIS_META&&QGIS_META.shadow_applied){
+    // QGISプラグインが「複数用途地域のうち最も厳しい基準」または「影が落ちる
+    // 先の区域の基準」（法56条の2第4項）を計算済みの場合、zone/far欄1つでは
+    // 表現できないその値をそのまま採用する。自動判定(autolv)をOFFにして
+    // 手入力欄に反映することで、hikageJudge()等がこの値で判定するようになる
+    // （effectiveHikageRule()参照）。d.calc.autolv/mh/lv3/lv5が別途指定されて
+    // いてもQGIS側の判定を優先する（より新しく、空間演算に基づく値のため）。
+    const sa=QGIS_META.shadow_applied;
+    $("autolv").checked=false;
+    $("mh").value=sa.mh;$("lv5").value=sa.t1;$("lv3").value=sa.t2;
+  }
   const p=d.print||{};if(p.title)$("ttl").value=p.title;if(p.memo!=null)$("memo").value=p.memo;
   printSecs=Array.isArray(p.secs)?p.secs.map(x=>({key:x.key,x:+x.x||0.05,y:+x.y||0.1,
     w:+x.w||0.42,flip:!!x.flip})):[];
@@ -2233,6 +2331,7 @@ function apply(d){
     cx:+b.cx||0,cy:+b.cy||0,fh:+b.fh||3.5,nf:+b.nf||3,ph:+b.ph||0}));
   sel=blds.length?0:-1;
   buildVertices();buildEdgeUI();buildBList();syncForm();buildTable();syncLevels();
+  renderQgisMeta();
   if(d.view)map.setView(d.view.center,d.view.zoom,{animate:false});
   resetCalc();
 }
