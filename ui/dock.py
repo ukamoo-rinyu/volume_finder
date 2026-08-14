@@ -458,7 +458,11 @@ class VolumeFinderDock(QDockWidget):
             (round(x / EDGE_MEMORY_ROUND_M), round(y / EDGE_MEMORY_ROUND_M))
             for x, y in pts_6674
         ]
-        digest = hashlib.sha1(repr(rounded).encode("utf-8")).hexdigest()[:20]
+        # QgsSettingsのキー用の非暗号学的なキャッシュキー（衝突耐性・改ざん耐性は
+        # 不要）。usedforsecurity=Falseで、セキュリティスキャナ(Bandit等)による
+        # 「弱いハッシュ」警告を抑止する（用途上はMD5等でも構わないが、SHA1が
+        # 標準ライブラリで最も手軽なため使用）。
+        digest = hashlib.sha1(repr(rounded).encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
         return digest
 
     def _load_persisted_edges(self, fingerprint):
