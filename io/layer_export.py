@@ -110,3 +110,73 @@ def add_candidates_to_project(candidates, crs_authid: str = "EPSG:6674", layer_n
     QgsProject.instance().addMapLayer(layer)
     layer.triggerRepaint()
     return layer
+
+
+# --- 複数棟配置 (ver0.3.0、分棟・L型、core.search.MultiCandidate) ---
+
+MULTI_FIELDS = [
+    ("rank", QVariant.Int),
+    ("building", QVariant.String),  # "A"/"B"
+    ("score", QVariant.Double),
+    ("floors", QVariant.Int),
+    ("height_m", QVariant.Double),
+    ("footprint_m2", QVariant.Double),
+    ("floor_area_m2", QVariant.Double),
+    ("total_far_pct", QVariant.Double),  # 2棟合計の容積率(%)
+    ("total_bcr_pct", QVariant.Double),  # 2棟合計の建蔽率(%)
+    ("binding", QVariant.String),
+    ("verdict", QVariant.String),
+]
+
+
+def multi_candidates_to_layer(
+    candidates, crs_authid: str = "EPSG:6674", layer_name: str = "候補建物（複数棟）"
+) -> QgsVectorLayer:
+    """MultiCandidate（2棟ぶんのBuildingPlacementを持つ、ver0.3.0）を、
+    棟ごとに1フィーチャずつのレイヤに書き出す。rankフィールドは2棟で
+    共通の値になる（同じ案の中の2棟だと分かるように）ので、既存の
+    _rank_renderer をそのまま再利用してカテゴリ分けできる。
+    """
+    layer = QgsVectorLayer(f"Polygon?crs={crs_authid}", layer_name, "memory")
+    pr = layer.dataProvider()
+    pr.addAttributes([QgsField(name, qtype) for name, qtype in MULTI_FIELDS])
+    layer.updateFields()
+
+    feats = []
+    for c in candidates:
+        for b in c.buildings:
+            corners = geo.rectangle_corners(b.cx, b.cy, b.W, b.D, b.rot)
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(QgsGeometry.fromPolygonXY([[QgsPointXY(x, y) for x, y in corners]]))
+            feat.setAttributes(
+                [
+                    c.rank,
+                    b.label,
+                    round(c.score, 3),
+                    b.floors,
+                    round(b.height, 2),
+                    round(b.footprint_area, 2),
+                    round(b.floor_area, 2),
+                    round(c.far_pct, 2),
+                    round(c.bcr_pct, 2),
+                    "・".join(c.binding),
+                    "適合",
+                ]
+            )
+            feats.append(feat)
+    pr.addFeatures(feats)
+    layer.updateExtents()
+
+    ranks = sorted({c.rank for c in candidates})
+    if ranks:
+        layer.setRenderer(_rank_renderer(ranks))
+    return layer
+
+
+def add_multi_candidates_to_project(
+    candidates, crs_authid: str = "EPSG:6674", layer_name: str = "候補建物（複数棟）"
+) -> QgsVectorLayer:
+    layer = multi_candidates_to_layer(candidates, crs_authid, layer_name)
+    QgsProject.instance().addMapLayer(layer)
+    layer.triggerRepaint()
+    return layer

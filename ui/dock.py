@@ -71,7 +71,7 @@ from ..io import html_export
 from ..io import json_export as jx
 from ..io import layer_export
 from .edge_table import EdgeTable
-from .result_table import ResultTable
+from .result_table import MultiResultTable, ResultTable
 from .search_task import SearchTask
 
 # HTMLツール (ZNAME/JUKYO) が理解できる10区分のみ。順序は既存HTMLのselectに合わせる。
@@ -129,6 +129,31 @@ ROTATION_MODE_CHOICES = [
 
 # アンカー配置 (ver0.2.0仕様2章)。既定はすべてON。
 ANCHOR_CHOICES = [(k, srch.ANCHOR_LABELS[k]) for k in srch.ANCHOR_KEYS]
+
+# 施設タイプ (ver0.3.0)。指定なし(None)＝従来どおり制約なしの自由探索。
+FACILITY_TYPE_CHOICES = [(None, "指定なし（自由）")] + [
+    (key, ft.name) for key, ft in srch.FACILITY_TYPES.items()
+]
+
+
+def _facility_type_summary(ftype):
+    """施設タイプの主な数値を短い説明文にする（UIの確認用ラベル）。"""
+    if ftype is None:
+        return "プロポーション・階数範囲などの制約なしで探索します。"
+    parts = [
+        f"階高{ftype.floor_height:.1f}m",
+        f"階数{ftype.min_floors}〜{ftype.max_floors}階" if ftype.max_floors else f"階数{ftype.min_floors}階以上",
+    ]
+    if ftype.min_footprint_dim:
+        parts.append(f"最低短辺{ftype.min_footprint_dim:.0f}m")
+    if ftype.max_aspect_ratio:
+        parts.append(f"長辺/短辺{ftype.max_aspect_ratio:.1f}以下")
+    if ftype.min_footprint_area:
+        parts.append(f"最低建築面積{ftype.min_footprint_area:.0f}m²")
+    if ftype.requires_yard:
+        parts.append(f"隣接空地{ftype.yard_min_area:.0f}m²以上（短辺{ftype.yard_min_side:.0f}m以上）必須")
+    return "　".join(parts)
+
 
 # 評価の重み (ver0.2.0仕様3.7章) のスライダー既定値。
 WEIGHT_DEFAULTS = {"far": 50, "open": 30, "light": 5, "impact": 0}
@@ -188,6 +213,12 @@ class VolumeFinderDock(QDockWidget):
         self._search_task = None
         self._search_results = []  # List[core.search.Candidate]（類似解間引き後の表示用）
         self._search_pool = []  # List[core.search.Candidate]（正規化済み・重み変更時の再ランキング用）
+
+        # ver0.3.0: 複数棟配置（分棟・L型）。単棟探索とは独立した並行の
+        # 結果セット（core.search.search_two_buildings、MultiCandidate）。
+        self._multi_search_task = None
+        self._multi_search_results = []
+        self._multi_search_pool = []
 
         self._build_ui()
 
@@ -313,6 +344,15 @@ class VolumeFinderDock(QDockWidget):
         self.max_floors_spin.setRange(1, 60)
         self.max_floors_spin.setValue(20)
         search_form.addRow("階数上限", self.max_floors_spin)
+        self.facility_type_combo = QComboBox()
+        for key, label in FACILITY_TYPE_CHOICES:
+            self.facility_type_combo.addItem(label, key)
+        search_form.addRow("施設タイプ（任意）", self.facility_type_combo)
+        self.facility_type_note = QLabel(_facility_type_summary(None))
+        self.facility_type_note.setWordWrap(True)
+        self.facility_type_note.setStyleSheet("color:#666;font-size:11px;")
+        self.facility_type_combo.currentIndexChanged.connect(self._on_facility_type_changed)
+        search_form.addRow(self.facility_type_note)
         self.rotation_mode_combo = QComboBox()
         for key, label in ROTATION_MODE_CHOICES:
             self.rotation_mode_combo.addItem(label, key)
@@ -427,6 +467,8 @@ class VolumeFinderDock(QDockWidget):
         export_layout.addWidget(self.export_msg)
         layout.addWidget(export_box)
 
+        layout.addWidget(self._build_multi_box())
+
         layout.addStretch(1)
         root.setLayout(layout)
 
@@ -436,6 +478,94 @@ class VolumeFinderDock(QDockWidget):
         scroll.setWidgetResizable(True)
         scroll.setWidget(root)
         self.setWidget(scroll)
+
+    def _build_multi_box(self):
+        """複数棟配置（分棟・L型、ver0.3.0、試験的機能）のUI。
+
+        単棟探索（①〜⑧）とは独立した並行のワークフローとして最後に
+        追加する。敷地・用途地域・境界線の条件・探索条件（最小離隔・階高・
+        階数上限・回転角モード・計算精度・アンカー）・評価の重みは、
+        上のセクションで入力したものをそのまま使い回す（この機能専用の
+        入力は「棟間の離隔距離」のみ）。
+        """
+        box = QGroupBox("複数棟配置を試す（分棟・L型、試験的機能）")
+        box_layout = QVBoxLayout(box)
+
+        note = QLabel(
+            "敷地を2つのゾーンに分けて、それぞれに1棟ずつ配置する組合せを探索します。"
+            "離隔距離を0にすると隙間なく接する配置（L型）になります。"
+            "回転は2棟で共有し、階数は棟ごとに独立して二分探索で決めますが、"
+            "同時に最適な組合せそのものを厳密に尽くすわけではない近似です。"
+            "敷地・用途地域・境界線の条件・探索条件・評価の重みは上の設定を"
+            "そのまま使います。"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#666;font-size:11px;")
+        box_layout.addWidget(note)
+
+        multi_form = QFormLayout()
+        self.building_gap_spin = QDoubleSpinBox()
+        self.building_gap_spin.setRange(0, 30)
+        self.building_gap_spin.setDecimals(1)
+        self.building_gap_spin.setValue(3.0)
+        self.building_gap_spin.setSuffix(" m")
+        multi_form.addRow("棟間の離隔距離（0mでL型）", self.building_gap_spin)
+        self.building_type_a_combo = QComboBox()
+        for key, label in FACILITY_TYPE_CHOICES:
+            self.building_type_a_combo.addItem(label, key)
+        multi_form.addRow("A棟タイプ（任意）", self.building_type_a_combo)
+        self.building_type_b_combo = QComboBox()
+        for key, label in FACILITY_TYPE_CHOICES:
+            self.building_type_b_combo.addItem(label, key)
+        multi_form.addRow("B棟タイプ（任意）", self.building_type_b_combo)
+        box_layout.addLayout(multi_form)
+
+        self.building_type_note = QLabel(f"A棟: {_facility_type_summary(None)}\nB棟: {_facility_type_summary(None)}")
+        self.building_type_note.setWordWrap(True)
+        self.building_type_note.setStyleSheet("color:#666;font-size:11px;")
+        self.building_type_a_combo.currentIndexChanged.connect(self._on_building_type_changed)
+        self.building_type_b_combo.currentIndexChanged.connect(self._on_building_type_changed)
+        box_layout.addWidget(self.building_type_note)
+
+        multi_btn_row = QVBoxLayout()
+        self.multi_search_run_btn = QPushButton("複数棟配置を探索")
+        self.multi_search_run_btn.clicked.connect(self.run_multi_search)
+        self.multi_search_run_btn.setEnabled(False)
+        multi_btn_row.addWidget(self.multi_search_run_btn)
+        self.multi_search_cancel_btn = QPushButton("中断")
+        self.multi_search_cancel_btn.clicked.connect(self.cancel_multi_search)
+        self.multi_search_cancel_btn.setEnabled(False)
+        multi_btn_row.addWidget(self.multi_search_cancel_btn)
+        box_layout.addLayout(multi_btn_row)
+
+        self.multi_search_progress_bar = QProgressBar()
+        self.multi_search_progress_bar.setValue(0)
+        box_layout.addWidget(self.multi_search_progress_bar)
+        self.multi_search_progress_label = QLabel("")
+        box_layout.addWidget(self.multi_search_progress_label)
+        self.multi_search_best_label = QLabel("")
+        box_layout.addWidget(self.multi_search_best_label)
+
+        self.multi_result_table = MultiResultTable()
+        box_layout.addWidget(self.multi_result_table)
+
+        self.export_multi_layer_btn = QPushButton("レイヤに出力（複数棟）")
+        self.export_multi_layer_btn.clicked.connect(self.export_multi_results_layer)
+        self.export_multi_layer_btn.setEnabled(False)
+        box_layout.addWidget(self.export_multi_layer_btn)
+
+        self.export_multi_btn = QPushButton("JSONで書き出し（複数棟、HTMLツール用）")
+        self.export_multi_btn.clicked.connect(self.export_multi_json)
+        self.export_multi_btn.setEnabled(False)
+        box_layout.addWidget(self.export_multi_btn)
+        self.export_multi_html_check = QCheckBox("HTMLファイルとしても書き出す（開くだけで確認できます）")
+        self.export_multi_html_check.setChecked(True)
+        box_layout.addWidget(self.export_multi_html_check)
+        self.export_multi_msg = QLabel("")
+        self.export_multi_msg.setWordWrap(True)
+        box_layout.addWidget(self.export_multi_msg)
+
+        return box
 
     # ------------------------------------------------------------------
     # 境界線の条件（辺ごとの接する状況・幅員）をQGIS再起動をまたいで記憶する。
@@ -585,6 +715,7 @@ class VolumeFinderDock(QDockWidget):
 
         self.export_btn.setEnabled(True)
         self.search_run_btn.setEnabled(True)
+        self.multi_search_run_btn.setEnabled(True)
         self._update_setback_check()
 
     # ------------------------------------------------------------------
@@ -805,10 +936,22 @@ class VolumeFinderDock(QDockWidget):
     # ------------------------------------------------------------------
     # 最大ボリューム探索 (設計書 3章、4.2の応答性確保)
     # ------------------------------------------------------------------
-    def run_search(self):
+    def _on_facility_type_changed(self, _index=None):
+        """単棟探索の施設タイプ選択（ver0.3.0）。数値の説明ラベルを更新し、
+        探索条件が変わったので直前の探索結果を無効化する。"""
+        ftype = srch.FACILITY_TYPES.get(self.facility_type_combo.currentData())
+        self.facility_type_note.setText(_facility_type_summary(ftype))
+        self._invalidate_search_results("施設タイプ")
+
+    def _gather_common_search_inputs(self):
+        """単棟探索(run_search)・複数棟配置探索(run_multi_search)で共通する
+        入力（境界線条件・複数用途地域の判定用領域・建築可能範囲・アンカー・
+        計算精度プリセット）をまとめて取得する。検証に失敗した場合は
+        QMessageBoxで理由を表示してNoneを返す（呼び出し側はNoneならreturnする）。
+        """
         if not self._site_local_6674:
             QMessageBox.warning(self, "探索", "先に敷地を取得してください。")
-            return
+            return None
         edges = self.edge_table.edges()
         if not any(e["type"] == "road" and e["width"] > 0 for e in edges):
             QMessageBox.warning(
@@ -816,7 +959,7 @@ class VolumeFinderDock(QDockWidget):
                 "道路に接する辺の幅員が入力されていません。前面道路幅員による容積率制限が"
                 "0%として扱われるため、このままでは候補が見つかりません。",
             )
-            return
+            return None
 
         preset = PRECISION_PRESETS[self.precision_combo.currentText()]
 
@@ -846,22 +989,31 @@ class VolumeFinderDock(QDockWidget):
                 f"最小離隔 {min_setback:.1f}m を確保すると敷地内に建築可能な範囲が残りません。"
                 "最小離隔を小さくしてください。",
             )
-            return
+            return None
 
         anchors = [key for key, cb in self.anchor_checks.items() if cb.isChecked()]
         if not anchors:
             QMessageBox.warning(self, "探索", "アンカーを少なくとも1つ選択してください。")
-            return
+            return None
 
-        params = srch.SearchParams(
-            min_setback=min_setback,
-            buildable_override=buildable,
+        return {
+            "edges": edges, "preset": preset, "zone_regions": zone_regions,
+            "min_setback": min_setback, "buildable": buildable, "anchors": anchors,
+        }
+
+    def _build_search_params(self, common, **overrides):
+        """_gather_common_search_inputs()の戻り値からSearchParamsを組み立てる。
+        overridesはSearchParamsの追加・上書き用（例: 複数棟探索のbuilding_gap）。
+        """
+        kwargs = dict(
+            min_setback=common["min_setback"],
+            buildable_override=common["buildable"],
             floor_height=self.floor_height_spin.value(),
             max_floors=self.max_floors_spin.value(),
             rotation_mode=self.rotation_mode_combo.currentData(),
             rotation_step_deg=float(self.rotation_step_combo.currentData()),
-            anchors=anchors,
-            shadow_dt_minutes=preset["shadow_dt_minutes"],
+            anchors=common["anchors"],
+            shadow_dt_minutes=common["preset"]["shadow_dt_minutes"],
             shadow_cell=None,
             bcr_relax=self.bcr_relax_combo.currentData(),
             max_results=self.max_results_spin.value(),
@@ -871,8 +1023,18 @@ class VolumeFinderDock(QDockWidget):
             weight_light=self.weight_sliders["light"].value(),
             weight_impact=self.weight_sliders["impact"].value(),
             hikage_regions=self._hikage_regions or None,
-            zone_regions=zone_regions or None,
+            zone_regions=common["zone_regions"] or None,
         )
+        kwargs.update(overrides)
+        return srch.SearchParams(**kwargs)
+
+    def run_search(self):
+        common = self._gather_common_search_inputs()
+        if common is None:
+            return
+        facility_type = srch.FACILITY_TYPES.get(self.facility_type_combo.currentData())
+        params = self._build_search_params(common, facility_type=facility_type)
+        edges = common["edges"]
         zone_key = self.zone_combo.currentData()
         far = self.far_spin.value()
         bcr = self.bcr_spin.value()
@@ -925,35 +1087,138 @@ class VolumeFinderDock(QDockWidget):
         else:
             self.search_progress_label.setText("完了：条件を満たす候補が見つかりませんでした")
 
+    # ------------------------------------------------------------------
+    # 複数棟配置探索 (ver0.3.0、分棟・L型)
+    # ------------------------------------------------------------------
+    def _on_building_type_changed(self, _index=None):
+        """複数棟配置のA棟/B棟タイプ選択（ver0.3.0）。数値の説明ラベルを
+        更新し、探索条件が変わったので直前の探索結果を無効化する。"""
+        a = srch.FACILITY_TYPES.get(self.building_type_a_combo.currentData())
+        b = srch.FACILITY_TYPES.get(self.building_type_b_combo.currentData())
+        self.building_type_note.setText(f"A棟: {_facility_type_summary(a)}\nB棟: {_facility_type_summary(b)}")
+        self._invalidate_search_results("施設タイプ")
+
+    def run_multi_search(self):
+        common = self._gather_common_search_inputs()
+        if common is None:
+            return
+        building_types = (
+            srch.FACILITY_TYPES.get(self.building_type_a_combo.currentData()),
+            srch.FACILITY_TYPES.get(self.building_type_b_combo.currentData()),
+        )
+        params = self._build_search_params(
+            common, building_gap=self.building_gap_spin.value(), building_types=building_types,
+        )
+        edges = common["edges"]
+        zone_key = self.zone_combo.currentData()
+        far = self.far_spin.value()
+        bcr = self.bcr_spin.value()
+
+        self._multi_search_task = SearchTask(
+            "複数棟配置探索", list(self._site_local_6674), edges, zone_key, far, bcr, params,
+            search_fn=srch.search_two_buildings,
+        )
+        self._multi_search_task.progress_update.connect(self._on_multi_search_progress)
+        self._multi_search_task.taskCompleted.connect(self._on_multi_search_finished)
+        self._multi_search_task.taskTerminated.connect(self._on_multi_search_finished)
+        QgsApplication.taskManager().addTask(self._multi_search_task)
+
+        self.multi_search_run_btn.setEnabled(False)
+        self.multi_search_cancel_btn.setEnabled(True)
+        self.multi_search_progress_bar.setValue(0)
+        self.multi_search_progress_label.setText("分割パターンを生成中…")
+        self.multi_search_best_label.setText("")
+
+    def cancel_multi_search(self):
+        if self._multi_search_task is not None:
+            self._multi_search_task.cancel()
+
+    def _on_multi_search_progress(self, done, total, best):
+        self.multi_search_progress_bar.setMaximum(max(1, total))
+        self.multi_search_progress_bar.setValue(done)
+        self.multi_search_progress_label.setText(f"分割パターン {done}/{total} を評価中")
+        if best is not None:
+            a, b = best.buildings
+            self.multi_search_best_label.setText(
+                f"現在の最良：A棟{a.floors}階／B棟{b.floors}階　延床合計 {best.floor_area:,.0f}m²"
+            )
+
+    def _on_multi_search_finished(self, *_args):
+        task = self._multi_search_task
+        if task is None:
+            return
+        self._multi_search_task = None  # taskCompleted/taskTerminatedが両方来ても二重処理しない
+        self.multi_search_run_btn.setEnabled(True)
+        self.multi_search_cancel_btn.setEnabled(False)
+
+        if task.exception is not None:
+            QMessageBox.critical(self, "複数棟配置", f"探索中にエラーが発生しました：{task.exception}")
+            return
+
+        self._multi_search_results = task.results
+        self._multi_search_pool = task.pool
+        self.multi_result_table.set_results(self._multi_search_results)
+        self.export_multi_layer_btn.setEnabled(bool(self._multi_search_results))
+        self.export_multi_btn.setEnabled(bool(self._multi_search_results))
+        if self._multi_search_results:
+            best = self._multi_search_results[0]
+            a, b = best.buildings
+            self.multi_search_progress_label.setText(
+                f"完了：候補 {len(self._multi_search_results)} 件（プール {len(self._multi_search_pool)} 件）"
+            )
+            self.multi_search_best_label.setText(
+                f"最良案：A棟{a.floors}階／B棟{b.floors}階　延床合計 {best.floor_area:,.0f}m²"
+            )
+        else:
+            self.multi_search_progress_label.setText("完了：条件を満たす候補が見つかりませんでした")
+
     def _on_weight_changed(self, *_args):
         """評価の重みスライダーの変更（仕様3.7「重み変更時はソートし直すだけ」）。
 
         直前の探索で得たプール（self._search_pool、正規化済みの指標を持つ）を
         使って並び替え・類似解間引きをやり直すだけで、core.search.search() は
         呼ばない。プールが無ければ（まだ探索していない）何もしない。
+        複数棟配置のプール（self._multi_search_pool）があれば、同じ重み・
+        表示件数・類似解間引き距離でそちらも並び替える
+        （core.search.MultiCandidateはCandidateと同名のフィールドを持つため、
+        core.search.rerank をそのまま使い回せる）。
         """
-        if not self._search_pool:
-            return
         weights = {
             "far": self.weight_sliders["far"].value(),
             "open": self.weight_sliders["open"].value(),
             "light": self.weight_sliders["light"].value(),
             "impact": self.weight_sliders["impact"].value(),
         }
-        self._search_results = srch.rerank(
-            self._search_pool, weights, self._site_area,
-            dedupe_threshold=self.dedupe_threshold_spin.value(),
-            max_results=self.max_results_spin.value(),
-        )
-        self.result_table.set_results(self._search_results)
-        self.export_layer_btn.setEnabled(bool(self._search_results))
-        if self._search_results:
-            best = self._search_results[0]
-            self.search_best_label.setText(f"最良案：{best.floors}階 延床 {best.floor_area:,.0f}m²")
+        if self._search_pool:
+            self._search_results = srch.rerank(
+                self._search_pool, weights, self._site_area,
+                dedupe_threshold=self.dedupe_threshold_spin.value(),
+                max_results=self.max_results_spin.value(),
+            )
+            self.result_table.set_results(self._search_results)
+            self.export_layer_btn.setEnabled(bool(self._search_results))
+            if self._search_results:
+                best = self._search_results[0]
+                self.search_best_label.setText(f"最良案：{best.floors}階 延床 {best.floor_area:,.0f}m²")
+        if self._multi_search_pool:
+            self._multi_search_results = srch.rerank(
+                self._multi_search_pool, weights, self._site_area,
+                dedupe_threshold=self.dedupe_threshold_spin.value(),
+                max_results=self.max_results_spin.value(),
+            )
+            self.multi_result_table.set_results(self._multi_search_results)
+            self.export_multi_layer_btn.setEnabled(bool(self._multi_search_results))
+            self.export_multi_btn.setEnabled(bool(self._multi_search_results))
+            if self._multi_search_results:
+                best = self._multi_search_results[0]
+                a, b = best.buildings
+                self.multi_search_best_label.setText(
+                    f"最良案：A棟{a.floors}階／B棟{b.floors}階　延床合計 {best.floor_area:,.0f}m²"
+                )
 
     def _invalidate_search_results(self, reason=None):
         """探索条件（用途地域・容積率・建蔽率・境界条件・敷地）が変わったら、
-        古い探索結果を保持し続けない。
+        古い探索結果を保持し続けない（単棟・複数棟の両方）。
 
         実際に見つかった不具合の再現: 「用途地域を取得」で按分容積率・
         按分建蔽率が更新されても（例: 200%→300%）、それより前に行った
@@ -963,21 +1228,35 @@ class VolumeFinderDock(QDockWidget):
         不要なので、ここでは呼ばない（_on_weight_changed / core.search.rerank
         を使う）。
         """
-        if not self._search_results and not self._search_pool:
-            return  # まだ探索していない、またはすでに無効化済み（連続呼び出しの無駄打ちを防ぐ）
-        self._search_results = []
-        self._search_pool = []
-        self.result_table.set_results([])
-        self.export_layer_btn.setEnabled(False)
-        prefix = f"{reason}が変更されたため、" if reason else ""
-        self.search_progress_label.setText(f"{prefix}直前の探索結果は無効になりました。再探索してください。")
-        self.search_best_label.setText("")
+        if self._search_results or self._search_pool:
+            self._search_results = []
+            self._search_pool = []
+            self.result_table.set_results([])
+            self.export_layer_btn.setEnabled(False)
+            prefix = f"{reason}が変更されたため、" if reason else ""
+            self.search_progress_label.setText(f"{prefix}直前の探索結果は無効になりました。再探索してください。")
+            self.search_best_label.setText("")
+        if self._multi_search_results or self._multi_search_pool:
+            self._multi_search_results = []
+            self._multi_search_pool = []
+            self.multi_result_table.set_results([])
+            self.export_multi_layer_btn.setEnabled(False)
+            self.export_multi_btn.setEnabled(False)
+            prefix = f"{reason}が変更されたため、" if reason else ""
+            self.multi_search_progress_label.setText(f"{prefix}直前の探索結果は無効になりました。再探索してください。")
+            self.multi_search_best_label.setText("")
 
     def export_results_layer(self):
         if not self._search_results:
             QMessageBox.warning(self, "レイヤ出力", "先に探索を実行してください。")
             return
         layer_export.add_candidates_to_project(self._search_results, crs_authid=TARGET_CRS)
+
+    def export_multi_results_layer(self):
+        if not self._multi_search_results:
+            QMessageBox.warning(self, "レイヤ出力", "先に複数棟配置の探索を実行してください。")
+            return
+        layer_export.add_multi_candidates_to_project(self._multi_search_results, crs_authid=TARGET_CRS)
 
     # ------------------------------------------------------------------
     # 接道義務チェック (設計書 2.3-4)
@@ -1017,20 +1296,33 @@ class VolumeFinderDock(QDockWidget):
             return self._search_results[row]
         return self._search_results[0]
 
-    def _candidate_to_building(self, candidate):
-        """core.search.Candidate（EPSG:6674座標）をHTMLツールのbuilding形式に変換する。
+    def _selected_multi_candidate(self):
+        """複数棟配置の結果テーブルで選択中の案。未選択なら1位を既定にする。"""
+        if not self._multi_search_results:
+            return None
+        row = self.multi_result_table.selected_row()
+        if row is not None and 0 <= row < len(self._multi_search_results):
+            return self._multi_search_results[row]
+        return self._multi_search_results[0]
 
-        cx/cyは敷地の頂点と同じ変換（EPSG:6674 -> 緯度経度 -> 重心原点の
-        ローカルXY、設計書2.4）を通す必要がある。単純にEPSG:6674の値を
-        そのまま使うと、敷地ポリゴン（既にローカルXY変換済み）とズレる。
-        rotはEPSG:6674とローカルXYの東西南北がほぼ一致する
-        （どちらも赤道方向基準の平面直角座標系相当）ため変換せず流用する。
-        """
+    def _local_xy(self, cx, cy):
+        """EPSG:6674座標を、敷地の頂点と同じ変換（-> 緯度経度 -> 重心原点の
+        ローカルXY、設計書2.4）でHTMLツールのローカルXYに変換する。単純に
+        EPSG:6674の値をそのまま使うと、敷地ポリゴン（既にローカルXY変換済み）
+        とズレる。"""
         target_crs = QgsCoordinateReferenceSystem(TARGET_CRS)
         wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         to_wgs84 = QgsCoordinateTransform(target_crs, wgs84, QgsProject.instance())
-        ll_pt = to_wgs84.transform(QgsPointXY(candidate.cx, candidate.cy))
-        lx, ly = geo.latlng_to_local(ll_pt.y(), ll_pt.x(), self._origin_latlng[0], self._origin_latlng[1])
+        ll_pt = to_wgs84.transform(QgsPointXY(cx, cy))
+        return geo.latlng_to_local(ll_pt.y(), ll_pt.x(), self._origin_latlng[0], self._origin_latlng[1])
+
+    def _candidate_to_building(self, candidate):
+        """core.search.Candidate（EPSG:6674座標）をHTMLツールのbuilding形式に変換する。
+
+        rotはEPSG:6674とローカルXYの東西南北がほぼ一致する（どちらも赤道
+        方向基準の平面直角座標系相当）ため変換せず流用する。
+        """
+        lx, ly = self._local_xy(candidate.cx, candidate.cy)
         return {
             "name": f"候補{candidate.rank}",
             "W": round(candidate.W, 2),
@@ -1042,6 +1334,73 @@ class VolumeFinderDock(QDockWidget):
             "nf": candidate.floors,
             "ph": 0,
         }
+
+    def _multi_candidate_to_buildings(self, candidate):
+        """core.search.MultiCandidate（ver0.3.0、2棟）をHTMLツールのbuilding
+        形式のリスト（2件）に変換する。_candidate_to_buildingの複数棟版。"""
+        buildings = []
+        for b in candidate.buildings:
+            lx, ly = self._local_xy(b.cx, b.cy)
+            buildings.append({
+                "name": f"{candidate.rank}位 {b.label}棟",
+                "W": round(b.W, 2),
+                "D": round(b.D, 2),
+                "rot": round(b.rot, 2),
+                "cx": round(lx, 3),
+                "cy": round(ly, 3),
+                "fh": self.floor_height_spin.value(),
+                "nf": b.floors,
+                "ph": 0,
+            })
+        return buildings
+
+    def _zone_shadow_qgis_extra(self):
+        """JSON書き出しの_qgis拡張のうち、用途地域・日影規制の内訳
+        （単棟・複数棟の書き出しで共通）をまとめて返す。self._zone_resultsが
+        空（用途地域を未取得）なら空dict。"""
+        if not self._zone_results:
+            return {}
+        extra = {
+            "zones": [
+                {
+                    "name": reg.ZNAME.get(r["zone_key"], r["name"]),
+                    "far": r["far"],
+                    "bcr": r["bcr"],
+                    "area": r["area"],
+                }
+                for r in self._zone_results
+            ],
+            "far_prorated": self._far_prorated,
+            "bcr_prorated": self._bcr_prorated,
+            "zone_warnings": self._zone_warnings,
+        }
+        if self._shadow_strictest:
+            sk, sfar, srule = self._shadow_strictest
+            # 敷地自身の区域(distance=0) + 影が落ちる先の対象区域(設計書3.5)を
+            # 1つのリストにまとめる（設計書5.2の shadow_zones スキーマに合わせる）。
+            own_zone_pairs = {(r["zone_key"], r["far"]) for r in self._zone_results if r["zone_key"]}
+            shadow_zones = [
+                {"name": reg.ZNAME.get(z, z), "far": f, "mh": rule["mh"], "t1": rule["t1"], "t2": rule["t2"], "distance": 0.0}
+                for z, f in own_zone_pairs
+                if (rule := reg.hikage_rule(z, f))
+            ]
+            shadow_zones.extend(
+                {
+                    "name": reg.ZNAME.get(z["zone_key"], z["name"]),
+                    "far": z["far"],
+                    "mh": reg.hikage_rule(z["zone_key"], z["far"])["mh"],
+                    "t1": reg.hikage_rule(z["zone_key"], z["far"])["t1"],
+                    "t2": reg.hikage_rule(z["zone_key"], z["far"])["t2"],
+                    "distance": round(z["distance"], 1),
+                }
+                for z in self._shadow_target_zones
+            )
+            extra["shadow_zones"] = shadow_zones
+            extra["shadow_applied"] = {
+                "name": reg.ZNAME.get(sk, sk), "far": sfar, **srule,
+                "from_target": (sk, sfar) not in own_zone_pairs,  # 設計書3.5: 影が落ちる先の区域の基準か
+            }
+        return extra
 
     # ------------------------------------------------------------------
     # JSON書き出し (設計書 5.2)
@@ -1067,45 +1426,7 @@ class VolumeFinderDock(QDockWidget):
             "simplify_tolerance_m": self.simplify_spin.value(),
             "warnings": self._site_warnings,
         }
-        if self._zone_results:
-            qgis_extra["zones"] = [
-                {
-                    "name": reg.ZNAME.get(r["zone_key"], r["name"]),
-                    "far": r["far"],
-                    "bcr": r["bcr"],
-                    "area": r["area"],
-                }
-                for r in self._zone_results
-            ]
-            qgis_extra["far_prorated"] = self._far_prorated
-            qgis_extra["bcr_prorated"] = self._bcr_prorated
-            qgis_extra["zone_warnings"] = self._zone_warnings
-            if self._shadow_strictest:
-                sk, sfar, srule = self._shadow_strictest
-                # 敷地自身の区域(distance=0) + 影が落ちる先の対象区域(設計書3.5)を
-                # 1つのリストにまとめる（設計書5.2の shadow_zones スキーマに合わせる）。
-                own_zone_pairs = {(r["zone_key"], r["far"]) for r in self._zone_results if r["zone_key"]}
-                shadow_zones = [
-                    {"name": reg.ZNAME.get(z, z), "far": f, "mh": rule["mh"], "t1": rule["t1"], "t2": rule["t2"], "distance": 0.0}
-                    for z, f in own_zone_pairs
-                    if (rule := reg.hikage_rule(z, f))
-                ]
-                shadow_zones.extend(
-                    {
-                        "name": reg.ZNAME.get(z["zone_key"], z["name"]),
-                        "far": z["far"],
-                        "mh": reg.hikage_rule(z["zone_key"], z["far"])["mh"],
-                        "t1": reg.hikage_rule(z["zone_key"], z["far"])["t1"],
-                        "t2": reg.hikage_rule(z["zone_key"], z["far"])["t2"],
-                        "distance": round(z["distance"], 1),
-                    }
-                    for z in self._shadow_target_zones
-                )
-                qgis_extra["shadow_zones"] = shadow_zones
-                qgis_extra["shadow_applied"] = {
-                    "name": reg.ZNAME.get(sk, sk), "far": sfar, **srule,
-                    "from_target": (sk, sfar) not in own_zone_pairs,  # 設計書3.5: 影が落ちる先の区域の基準か
-                }
+        qgis_extra.update(self._zone_shadow_qgis_extra())
         if candidate is not None:
             qgis_extra["rank"] = candidate.rank
             qgis_extra["binding"] = candidate.binding
@@ -1142,3 +1463,68 @@ class VolumeFinderDock(QDockWidget):
             self.export_msg.setText(f"書き出しました：{path}\n{html_path}{candidate_note}")
         else:
             self.export_msg.setText(f"書き出しました：{path}{candidate_note}")
+
+    def export_multi_json(self):
+        """複数棟配置（ver0.3.0）の選択中の案を、HTMLツール用JSONで書き出す。
+        単棟版のexport_json()と並存する別ボタン（設計書上の使い分けは
+        「単棟の結果」と「複数棟の結果」で完全に独立させる、という方針）。
+        """
+        if self._site_local is None or self._origin_latlng is None:
+            QMessageBox.warning(self, "書き出し", "先に敷地を取得してください。")
+            return
+        candidate = self._selected_multi_candidate()
+        if candidate is None:
+            QMessageBox.warning(self, "書き出し", "先に複数棟配置の探索を実行してください。")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "JSONで書き出し（複数棟）", "", "JSON Files (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+
+        edges = self.edge_table.edges()
+        zone_key = self.zone_combo.currentData()
+        buildings = self._multi_candidate_to_buildings(candidate)
+        qgis_extra = {
+            "flipped": self._flipped,
+            "source_layer": self._source_layer_name,
+            "source_fids": self._source_fids,
+            "simplify_tolerance_m": self.simplify_spin.value(),
+            "warnings": self._site_warnings,
+            "rank": candidate.rank,
+            "binding": candidate.binding,
+        }
+        qgis_extra.update(self._zone_shadow_qgis_extra())
+        doc = jx.build_json(
+            self._site_local,
+            self._origin_latlng[0],
+            self._origin_latlng[1],
+            edges,
+            zone=zone_key,
+            far=self.far_spin.value(),
+            bcr=self.bcr_spin.value(),
+            bcrx=self.bcr_relax_combo.currentData(),
+            buildings=buildings,
+            qgis_extra=qgis_extra,
+        )
+        self._last_edges = edges
+        try:
+            jx.write_json(path, doc)
+        except OSError as e:
+            QMessageBox.critical(self, "書き出し", f"書き出しに失敗しました：{e}")
+            return
+
+        html_path = None
+        if self.export_multi_html_check.isChecked():
+            html_path = os.path.splitext(path)[0] + ".html"
+            try:
+                html_export.write_standalone_html(html_path, doc)
+            except OSError as e:
+                QMessageBox.warning(self, "書き出し", f"JSONは書き出せましたが、HTMLの書き出しに失敗しました：{e}")
+                html_path = None
+
+        candidate_note = f"（{candidate.rank}位の案、2棟を含む）"
+        if html_path:
+            self.export_multi_msg.setText(f"書き出しました：{path}\n{html_path}{candidate_note}")
+        else:
+            self.export_multi_msg.setText(f"書き出しました：{path}{candidate_note}")

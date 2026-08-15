@@ -31,6 +31,9 @@ body{font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP","Yu Goth
 #guide:hover{background:var(--sun);color:#fff}
 #toggle{background:none;border:1px solid var(--line);color:var(--muted);border-radius:8px;
   width:28px;height:28px;font-size:15px;cursor:pointer;flex:none}
+#globalActions{padding:10px 14px 8px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+#globalActions .act.big{margin-top:0}
+#globalActions .note{color:var(--muted);font-size:11.5px;line-height:1.5;margin:5px 0 0}
 #tabs{display:flex;border-bottom:1px solid var(--line);background:#F4EFE6}
 #tabs button{flex:1;background:none;border:0;border-bottom:2px solid transparent;color:var(--ink-2);
   padding:10px 2px;font-size:12px;cursor:pointer;font-family:inherit;font-weight:600}
@@ -184,6 +187,8 @@ body.printmode #gmap{display:none!important}
 #v3d canvas{display:block;width:300px;height:210px;cursor:grab;touch-action:none}
 #v3d .f{padding:5px 10px;font-size:10.5px;color:var(--muted);border-top:1px solid var(--line)}
 body.mini3d #v3d canvas,body.mini3d #v3d .f{display:none}
+body.big3d #v3d{width:600px}
+body.big3d #v3d canvas{width:600px;height:420px}
 
 #drawbar{position:absolute;z-index:1100;top:12px;left:50%;transform:translateX(-50%);display:none;
   align-items:center;gap:8px;background:var(--panel);border:1.5px solid var(--sun);border-radius:12px;
@@ -385,7 +390,14 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
 </div>
 
 <div id="v3d">
-  <div class="h">3Dプレビュー<button id="v3dmin">−</button></div>
+  <div class="h">3Dプレビュー
+    <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+      <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;color:var(--ink-2);margin:0">
+        <input type="checkbox" id="v3dSlant" checked style="width:13px;height:13px;accent-color:var(--sun)">斜線面</label>
+      <button id="v3dbig" title="大きく表示" style="margin-left:0">⛶</button>
+      <button id="v3dmin" style="margin-left:0">−</button>
+    </div>
+  </div>
   <canvas id="cv3d" width="600" height="420"></canvas>
   <div class="f">ドラッグ＝回転／Shift＋ドラッグ＝移動／ホイール＝拡大／ダブルクリック＝リセット　<span id="v3dinfo"></span></div>
 </div>
@@ -411,10 +423,14 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
     <div><h1>日影図・高さ制限チェッカー ver.4</h1><p id="subttl">大阪市基準 ／ 冬至日 ／ 真太陽時 8–16時</p></div>
     <button id="guide">使い方</button><button id="toggle">−</button>
   </div>
+  <div id="globalActions">
+    <button class="act big" id="judge">すべて判定する</button>
+    <div id="judgeQuick" class="note" style="margin:4px 0 0"></div>
+  </div>
   <div id="tabs">
     <button data-t="t1" class="on">①敷地</button>
     <button data-t="t2">②建物</button>
-    <button data-t="t3">③判定<span class="tmark" id="mk3"></span></button>
+    <button data-t="t3">③斜線<span class="tmark" id="mk3"></span></button>
     <button data-t="t4">日影図<span class="tmark" id="mk4"></span></button>
     <button data-t="t5">保存</button>
   </div>
@@ -496,8 +512,7 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
   </div>
 
   <div class="tab" id="t3">
-    <div class="step"><span class="stepno">3</span><b>敷地と建物がそろったら、まとめて判定します。</b>建蔽率・容積率・道路斜線・隣地斜線・日影規制を一度に計算します。</div>
-    <button class="act big" id="judge">すべて判定する</button>
+    <div class="step"><span class="stepno">3</span><b>敷地と建物がそろったら、まとめて判定します。</b>建蔽率・容積率・道路斜線・隣地斜線・日影規制を一度に計算します（上部の「すべて判定する」ボタン）。</div>
     <div id="jsum" class="card">まだ判定していません。</div>
     <div id="jbcr" class="card">—</div>
     <div id="jvol" class="card">—</div>
@@ -511,7 +526,7 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
 
   <div class="tab" id="t4">
     <h3>等時間日影線<button class="q" data-h="iso">?</button></h3>
-    <button class="act" id="calc">等時間日影線を計算</button>
+    <p class="note">上部の「すべて判定する」ボタンを押すと、ここも合わせて計算されます。</p>
     <div id="outj" class="card">まだ計算していません。</div>
     <div id="out" class="card">敷地と建物を配置してから計算してください。</div>
 
@@ -561,8 +576,12 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
     <div class="btnrow"><button class="act ghost" id="save">JSONで保存</button><button class="act ghost" id="load">JSONを読み込む</button></div>
     <input type="file" id="fin" accept=".json,application/json" style="display:none">
     <p class="note" id="jsonmsg">敷地・建物（複数）・境界条件・用途地域・計算設定をまとめて1ファイルに保存します。</p>
+    <h3>Googleアースで見る<button class="q" data-h="kml">?</button></h3>
+    <div class="btnrow"><button class="act ghost" id="saveKml">KMLで書き出す</button></div>
+    <p class="note">敷地と建物（高さ付きの立体）、道路斜線・隣地斜線の規制面（傾いた板として）をKML形式で書き出します。
+      Google Earth（アプリ版／Web版）で開くと、周辺の実写と重ねて立体を確認できます。</p>
     <h3>A4印刷<button class="q" data-h="print">?</button></h3>
-    <p class="note">断面図を図面に載せたいときは、<b>③判定タブ</b>で図を開き
+    <p class="note">断面図を図面に載せたいときは、<b>③斜線タブ</b>で図を開き
       「この図をA4図面に入れる」にチェックしてください。プレビュー上で移動・反転・拡大縮小ができます。</p>
     <div class="f"><label>図面のタイトル</label><input type="text" id="ttl" value="日影図・高さ制限検討図"></div>
     <div class="f" style="margin-top:9px"><label>備考（案件名など）</label><input type="text" id="memo" placeholder="例：○○小学校 複合化検討案A"></div>
@@ -1290,6 +1309,14 @@ function draw3D(){
     const b=BG(bb),cs=corners(b),H=b.H;
     const ng=lastJudge&&lastJudge.bad&&lastJudge.bad.has(i);
     const base=ng?[196,80,70]:[96,90,82];
+    // 階数ごとのライン：階高(fh)刻みで水平線を入れる。塔屋等(ph)がある場合は
+    // 最上階の床（＝塔屋の立上り位置）にも1本足して塔屋部分を区別する。
+    const fh=+bb.fh||0,nf=Math.max(1,Math.round(+bb.nf||1));
+    const floorZ=[];
+    if(fh>0){
+      for(let k=1;k<nf;k++)floorZ.push(k*fh);
+      if((+bb.ph||0)>0)floorZ.push(nf*fh);
+    }
     const fs=[];
     for(let k=0;k<4;k++){
       const a=cs[k],c=cs[(k+1)%4];
@@ -1298,7 +1325,8 @@ function draw3D(){
       if(nxv*vw[0]+nyv*vw[1]<=0)continue;
       const pts4=[[a[0],a[1],0],[c[0],c[1],0],[c[0],c[1],H],[a[0],a[1],H]];
       const d=pts4.reduce((sm,q)=>sm+DEP(q[0],q[1],q[2]),0)/4;
-      fs.push({pts:pts4,d,col:base,sh:0.74,stroke:true});}
+      const floors=floorZ.map(z=>[[a[0],a[1],z],[c[0],c[1],z]]);
+      fs.push({pts:pts4,d,col:base,sh:0.74,stroke:true,floors});}
     const top=cs.map(q=>[q[0],q[1],H]);
     fs.push({pts:top,d:top.reduce((sm,q)=>sm+DEP(q[0],q[1],q[2]),0)/4,col:base,sh:1.12,stroke:true});
     if(lastJudge&&lastJudge.over&&lastJudge.over[i])
@@ -1313,17 +1341,42 @@ function draw3D(){
   groups.sort((a,b)=>a.d-b.d);
   const faces=[];
   groups.forEach(g=>faces.push(...g.fs));
+  const slantChk=$("v3dSlant");
+  if(slantChk&&slantChk.checked){
+    slantEnvelopeQuads().forEach(pl=>{
+      const q=pl.quad;
+      const d=q.reduce((sm,p)=>sm+DEP(p[0],p[1],p[2]),0)/q.length+0.4; // 建物とほぼ同面のときは建物を優先して手前に出す
+      const col=pl.kind==="road"?[31,111,178]:[168,90,43];
+      faces.push({pts:q,d,slant:true,col});
+    });
+  }
   faces.sort((a,b)=>a.d-b.d);                     // 奥（小さい）から手前へ
   faces.forEach(f=>{
     ctx.beginPath();
     f.pts.forEach((q,j)=>{const p=T(q[0],q[1],q[2]);j?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]);});
     ctx.closePath();
+    if(f.slant){
+      ctx.globalAlpha=.40;
+      ctx.fillStyle=`rgb(${f.col[0]},${f.col[1]},${f.col[2]})`;ctx.fill();
+      ctx.globalAlpha=.85;
+      ctx.strokeStyle=`rgb(${f.col[0]},${f.col[1]},${f.col[2]})`;ctx.lineWidth=1.3;
+      ctx.setLineDash([4,3]);ctx.stroke();ctx.setLineDash([]);
+      ctx.globalAlpha=1;
+      return;
+    }
     const c3=f.col.map(v=>Math.max(0,Math.min(255,Math.round(v*f.sh))));
     ctx.globalAlpha=f.alpha||1;
     ctx.fillStyle=`rgb(${c3[0]},${c3[1]},${c3[2]})`;ctx.fill();
     ctx.globalAlpha=1;
     if(f.stroke){ctx.strokeStyle=f.stroke===true?"rgba(255,255,255,.5)":f.stroke;
       ctx.lineWidth=f.stroke===true?1:1.5;ctx.stroke();}
+    if(f.floors&&f.floors.length){
+      ctx.strokeStyle="rgba(255,255,255,.45)";ctx.lineWidth=.8;
+      f.floors.forEach(([p1,p2])=>{
+        const q1=T(p1[0],p1[1],p1[2]),q2=T(p2[0],p2[1],p2[2]);
+        ctx.beginPath();ctx.moveTo(q1[0],q1[1]);ctx.lineTo(q2[0],q2[1]);ctx.stroke();
+      });
+    }
   });
   // 真北の矢印（回転に追従）
   const nb=T(mx+(x0-mx)*1.15, my+(y1-my)*1.15, 0);
@@ -1360,6 +1413,21 @@ cv.addEventListener("wheel",e=>{e.preventDefault();
   zoom3=Math.max(0.4,Math.min(3,zoom3*(e.deltaY<0?1.12:0.89)));draw3D();},{passive:false});
 $("v3dmin").onclick=()=>{document.body.classList.toggle("mini3d");
   $("v3dmin").textContent=document.body.classList.contains("mini3d")?"＋":"−";};
+$("v3dSlant").onchange=()=>draw3D();
+/* 大きく表示：キャンバスの内部解像度もCSS表示サイズの2倍に合わせて
+   変える（既定の300×210(CSS)／600×420(内部)と同じ2倍比率を保つ）。
+   内部解像度を変えずCSS拡大だけすると輪郭がぼやけるため。 */
+let big3d=false;
+function resize3D(){
+  const cssW=big3d?600:300, cssH=big3d?420:210;
+  cv.width=cssW*2; cv.height=cssH*2;
+}
+$("v3dbig").onclick=()=>{
+  big3d=!big3d;
+  document.body.classList.toggle("big3d",big3d);
+  $("v3dbig").title=big3d?"元のサイズに戻す":"大きく表示";
+  resize3D();draw3D();
+};
 
 /* ===== [11] 斜線の判定 ===== */
 function edgeGeom(i){
@@ -1410,26 +1478,46 @@ function setbackOf(bi,i){
 }
 /* 棟×辺の後退距離をまとめて求める（判定のたびに1回だけ計算する） */
 function allSetbacks(){return blds.map((_,bi)=>edges.map((_,i)=>setbackOf(bi,i)));}
+/* 辺iについて、敷地内の全ての棟のうち最も近い（後退距離が最小の）ものを
+   返す。法56条2項の後退距離による緩和は、当該棟単独ではなく敷地の後退
+   距離として扱われるため、複数棟がある場合はこの最小値を敷地内の全棟で
+   共通して用いる（slopeCheck参照）。棟が1つだけならその棟自身の値になる。*/
+function minSetbackForEdge(i,SB){
+  let m=Infinity;
+  blds.forEach((bb,bi2)=>{
+    const sb=(SB&&SB[bi2]&&SB[bi2][i])||setbackOf(bi2,i);
+    if(sb.A<m)m=sb.A;
+  });
+  return isFinite(m)?m:0;
+}
 function slopeCheck(bi,i,SB){
   const b=BG(blds[bi]),e=edges[i],cf=ETYPE[e.type],g=edgeGeom(i);
   const z=$("zone").value,f=+$("far").value;
-  const sb=(SB&&SB[bi]&&SB[bi][i])||setbackOf(bi,i),A=sb.A,fp=corners(b);
+  const sb=(SB&&SB[bi]&&SB[bi][i])||setbackOf(bi,i),ownA=sb.A,fp=corners(b);
+  // 後退距離による緩和（いわゆる2A緩和、法56条2項）は、敷地内に複数の棟が
+  // ある場合、当該棟単独の後退距離ではなく、その辺に面する敷地内の全ての
+  // 棟のうち道路（または隣地境界線）に最も近い棟の後退距離を、敷地内の
+  // 全ての棟に共通して用いる（実際に見つかった不具合: 各棟が自分自身の
+  // 後退距離だけで緩和を受けていたため、他の棟より道路に近い棟が同じ
+  // 敷地内にあっても、離れた棟の方に本来より有利な＝過大な許容高さを
+  // 与えてしまっていた）。棟が1つだけならその棟自身の値と一致する。
+  const A=minSetbackForEdge(i,SB);
   if(e.type==="road"&&+e.width>0){
     const R=roadRule(z,f),w=+e.width,dStart=w+2*A;
     const dv=b.H/R.k-(w+A), lim=R.L-(w+A), cut=Math.min(dv,lim);
     const allow=R.k*dStart, ok=(dStart>R.L)||(b.H<=allow+1e-6);
     let poly=[];
     if(!ok&&cut>0)poly=clipPoly(fp,p=>cut-inwardDist(p,g));
-    return {kind:"road",ok,allow,A,w,R,dStart,beyond:dStart>R.L,poly,i,bi,sb};
+    return {kind:"road",ok,allow,A,ownA,w,R,dStart,beyond:dStart>R.L,poly,i,bi,sb};
   }
   if(cf.rin==="road")return null;
   const RR=rinRule(z);
   let A2=A; if(cf.rin==="half")A2+=(+e.width||0)/2;
-  if(b.H<=RR.H0+1e-6)return {kind:"rin",ok:true,allow:RR.H0,A:A2,RR,poly:[],i,bi,under:true,sb};
+  if(b.H<=RR.H0+1e-6)return {kind:"rin",ok:true,allow:RR.H0,A:A2,ownA,RR,poly:[],i,bi,under:true,sb};
   const dv=(b.H-RR.H0)/RR.k-A2, allow=RR.H0+RR.k*2*A2, ok=b.H<=allow+1e-6;
   let poly=[];
   if(!ok&&dv>0)poly=clipPoly(fp,p=>dv-inwardDist(p,g));
-  return {kind:"rin",ok,allow,A:A2,RR,poly,i,bi,sb};
+  return {kind:"rin",ok,allow,A:A2,ownA,RR,poly,i,bi,sb};
 }
 /* 断面図は既定で折りたたむ。適合していても開けば確認できる。 */
 /* 断面図はここに貯めておき、印刷プレビューで選んだものだけを図面に置く */
@@ -1475,26 +1563,43 @@ function sectionSVG(o){
       <text x="${bx+bw/2}" y="${Y(o.H)-6}" fill="#2A2724" font-size="9" text-anchor="middle">${o.H.toFixed(2)}m</text>`;
   if(o.bw)s+=`<text x="${bx+bw/2}" y="${GY-4}" fill="#5B554D" font-size="7" text-anchor="middle">${o.bw.toFixed(1)}m</text>`;
   // 適用距離の外にある建物には斜線がかからないので、許容高さの線は描かない
-  if(!o.beyond)
+  if(!o.beyond){
+    // ラベルが右端(w)からはみ出す場合はSVGのviewBox外にクリップされて文字が
+    // 切れて見えるため、右端に近いときは右揃えに切り替えて枠内に収める。
+    const allowTx=bx+bw+13,allowOver=allowTx>w-6;
     s+=`<line x1="${bx-10}" y1="${Y(o.allow)}" x2="${bx+bw+10}" y2="${Y(o.allow)}" stroke="#5B3FD6" stroke-width="1.5"/>
-      <text x="${bx+bw+13}" y="${Y(o.allow)+3}" fill="#5B3FD6" font-size="8">許容 ${o.allow.toFixed(2)}m</text>`;
-  else
+      <text x="${allowOver?w-4:allowTx}" y="${Y(o.allow)+3}" fill="#5B3FD6" font-size="8"
+        text-anchor="${allowOver?"end":"start"}">許容 ${o.allow.toFixed(2)}m</text>`;
+  }else
     s+=`<text x="${bx+bw/2}" y="${Y(o.H)-18}" fill="#2C7A55" font-size="8.5" text-anchor="middle" font-weight="700">制限なし</text>`;
   dims.forEach((d,i)=>{
     const y=GY+20+i*15,a=X(d.x1),b2=X(d.x2),c=d.color||"#7A736A";
+    // 寸法線のラベルは中央揃えが基本だが、区間が左端(x=0)や右端に近いと
+    // 中央位置がviewBoxの外にはみ出して文字が切れるため、端に近いときは
+    // 左揃え／右揃えに切り替えて枠内に収める。
+    const mid=(a+b2)/2,tx=Math.max(24,Math.min(w-24,mid));
+    const anchor=tx<=24?"start":(tx>=w-24?"end":"middle");
     s+=`<line x1="${a}" y1="${GY}" x2="${a}" y2="${y+4}" stroke="#C9C1B4" stroke-width=".7"/>
         <line x1="${b2}" y1="${GY}" x2="${b2}" y2="${y+4}" stroke="#C9C1B4" stroke-width=".7"/>
         <line x1="${a}" y1="${y}" x2="${b2}" y2="${y}" stroke="${c}" stroke-width="1"/>
         <path d="M${a} ${y} l4 -2.5 v5 z M${b2} ${y} l-4 -2.5 v5 z" fill="${c}"/>
-        <text x="${(a+b2)/2}" y="${y-3}" fill="${c}" font-size="7.5" text-anchor="middle">${d.label}</text>`;});
+        <text x="${tx}" y="${y-3}" fill="${c}" font-size="7.5" text-anchor="${anchor}">${d.label}</text>`;});
   return s+"</svg>";
 }
 
 /* ===== [12] 一括判定 ===== */
 function judgeAll(){
   const sa=siteArea(),z=$("zone").value,f=+$("far").value;
-  if(!sa){$("jsum").innerHTML='<b style="color:var(--ng)">敷地が未設定です。</b>①敷地タブで作図してください。';return;}
-  if(!blds.length){$("jsum").innerHTML='<b style="color:var(--ng)">建物がありません。</b>②建物タブで追加してください。';return;}
+  if(!sa){
+    $("jsum").innerHTML='<b style="color:var(--ng)">敷地が未設定です。</b>①敷地タブで作図してください。';
+    if($("judgeQuick"))$("judgeQuick").innerHTML='<span style="color:var(--ng)">敷地が未設定です（①敷地タブ）。</span>';
+    return;
+  }
+  if(!blds.length){
+    $("jsum").innerHTML='<b style="color:var(--ng)">建物がありません。</b>②建物タブで追加してください。';
+    if($("judgeQuick"))$("judgeQuick").innerHTML='<span style="color:var(--ng)">建物がありません（②建物タブ）。</span>';
+    return;
+  }
   let ba=0,fa=0;
   blds.forEach(x=>{const b=BG(x);ba+=b.bArea;fa+=b.fArea;});
 
@@ -1521,19 +1626,24 @@ function judgeAll(){
   const SB=allSetbacks();
   SECPOOL={};
   gSet.clearLayers();
-  /* 後退距離の測線は「辺ごとに、その辺で最も余裕のない棟」の1本だけを描く。
-     判定自体は棟ごとに行うが、線を全棟ぶん引くと見づらいため、効いている1本を示す。 */
-  const critical={};                       // 辺 → {bi,sb} 効いている棟
+  /* 後退距離の測線は「辺ごとに、その辺に最も近い（後退距離が最短の）棟」の
+     1本だけを描く。判定自体は棟ごとに行うが、線を全棟ぶん引くと見づらいため、
+     代表の1本を示す。以前は「余裕（許容高さ－実高さ）が最小の棟」で選んで
+     いたが、高さが違う棟が混在すると「近いのに余裕は大きい（低い棟）」
+     「遠いのに余裕は小さい（高い棟）」が逆転し、見た目の最短距離と選ばれる
+     棟が食い違うことがあった（実際に見つかった不具合）。素直に距離が最短の
+     棟を選ぶようにする。 */
+  const critical={};                       // 辺 → {bi,sb} 距離が最短の棟
   edges.forEach((e,i)=>{
     if(!e)return;
     const isRoad=(e.type==="road"&&+e.width>0);
     if(!isRoad&&ETYPE[e.type].rin==="road")return;
-    let pick=null,worst=Infinity;
+    let pick=null,shortest=Infinity;
     blds.forEach((bb,bi)=>{
       const r=slopeCheck(bi,i,SB);
       if(!r||r.under)return;
-      const margin=r.beyond?Infinity:(r.allow-BG(bb).H);   // 余裕が小さいほど効いている
-      if(margin<worst){worst=margin;pick={bi,r};}
+      const dist=r.sb.A; // 生の後退距離（緩和・水面等の加算前の実測値）
+      if(dist<shortest){shortest=dist;pick={bi,r};}
     });
     if(pick)critical[i]=pick;
   });
@@ -1560,6 +1670,20 @@ function judgeAll(){
   let roadAny=false,rinAny=false,roadNG=false,rinNG=false;
   gOver.clearLayers();
 
+  /* 断面図に描く棟を選ぶ: 「最も余裕のない棟」（超過していればその中で
+     超過が最も大きい棟）を選ぶ。critical[i]（地図の測線用、後退距離が
+     最短の棟）とは目的が違うので使い回さない——距離が近くても背が低い棟
+     より、距離は遠くても背が高くて超過している棟を断面図に出すべき
+     （実際に見つかった不具合: critical[i]を断面図にも流用していたため、
+     超過している棟ではなく単に一番近い棟の断面が表示されてしまっていた）。 */
+  const pickCritical=list=>{
+    let best=null,bestMargin=Infinity;
+    list.forEach(o=>{
+      const margin=o.r.beyond?Infinity:(o.r.allow-BG(o.bb).H);
+      if(margin<bestMargin){bestMargin=margin;best=o;}
+    });
+    return best||list[0];
+  };
   /* 判定は「辺ごと」にまとめて表示する。ただし後退距離と許容高さは
      棟ごとに違うので、棟ごとの行として並べる（法56条2項「当該建築物の後退距離」）。 */
   edges.forEach((e,i)=>{
@@ -1571,7 +1695,7 @@ function judgeAll(){
       const h=BG(o.bb).H,r=o.r,ok=r.ok;
       const allow=r.beyond?"制限なし":r.allow.toFixed(2)+" m";
       return `<div class="kv" style="border-top:1px dotted var(--line);padding-top:2px">
-        <span>${esc(o.bb.name)}　後退 ${r.A.toFixed(2)}m</span>
+        <span>${esc(o.bb.name)}　後退 ${r.ownA.toFixed(2)}m</span>
         <span>許容 ${allow} ／ 計画 <b style="color:${ok?"var(--ok)":"var(--ng)"}">${h.toFixed(2)}m ${ok?"✓":"✕"}</b></span></div>`;
     }).join("");
     if(kind==="road"){
@@ -1580,30 +1704,38 @@ function judgeAll(){
       ngs.forEach(o=>{roadNG=true;bad.add(o.bi);
         if(o.r.poly&&o.r.poly.length>=3)(over[o.bi]=over[o.bi]||[]).push({poly:o.r.poly,kind:"road",i});});
       // 断面図は「最も余裕のない棟」で描く。効いている棟を図にするため。
-      const cr=critical[i], pick=cr?rs.find(o=>o.bi===cr.bi):rs[0];
+      const pick=pickCritical(rs);
       const rp=pick.r, bT=BG(pick.bb), w=rp.w, R=rp.R;
       const allNG=rs.every(o=>!o.r.ok);
+      // 緩和の起点(x=0)は敷地内で最も道路に近い棟の後退距離(rp.A)で決まる
+      // が、断面に描く建物の壁は「その棟自身の」後退距離(rp.ownA)の位置に
+      // 置く（pickで選ばれた棟が最も近い棟と限らないため、rp.dStart
+      // (=道路幅員+2×rp.A)をそのまま壁の位置に使うと、別の棟の後退距離を
+      // 基準にした位置に壁を描いてしまう）。
+      const wallX=w+rp.A+rp.ownA;
+      const usesOtherBuilding=Math.abs(rp.ownA-rp.A)>1e-6;
       roadHtml+=`<div style="margin-top:9px;border-top:1px solid var(--line);padding-top:7px">
         <div class="ttl"><b>辺${i+1}（幅員 ${w}m）</b>
           <span class="badge ${ngs.length?"b-ng":"b-ok"}">${ngs.length?(allNG?"超過":"一部超過"):"適合"}</span></div>
         <div class="kv"><span>後退距離は棟ごとに測定<button class="q" data-h="setback" style="margin-left:3px">?</button></span>
           <span>適用距離 ${R.L} m</span></div>
-        ${rows(rs)}`
+        ${rows(rs)}
+        ${usesOtherBuilding?`<div class="note" style="margin-top:4px">許容高さの起点は、敷地内で最も道路に近い棟の後退距離（${rp.A.toFixed(2)}m）を敷地内の全ての棟に共通して使います（法56条2項）。</div>`:""}`
         +foldSec(rp.ok?"断面図を見る（適合）":"断面図を見る（超過部分）",
-          sectionSVG({k:R.k,H0:0,H:bT.H,allow:rp.allow,x0:0,bx:rp.dStart,
+          sectionSVG({k:R.k,H0:0,H:bT.H,allow:rp.allow,x0:0,bx:wallX,
            bw:sectionDepth(bT,edgeGeom(i)),ok:rp.ok,beyond:rp.beyond,
-           spanX:Math.max(rp.dStart+sectionDepth(bT,edgeGeom(i)),R.L+3),xEnd:R.L,
+           spanX:Math.max(wallX+sectionDepth(bT,edgeGeom(i)),R.L+3),xEnd:R.L,
            verticals:[{x:0,label:"起点",color:"#C0651A"},
                       {x:rp.A,label:"道路反対側",color:"#1F6FB2"},
                       {x:rp.A+w,label:"道路境界線",color:"#C0392B",dash:"1 0"},
-                      {x:rp.dStart,label:"建物外壁",color:"#7A736A"}],
+                      {x:wallX,label:`建物外壁${usesOtherBuilding?"（"+esc(pick.bb.name)+"）":""}`,color:"#7A736A"}],
            dims:[{x1:rp.A,x2:rp.A+w,label:`道路幅員 ${w}m`,color:"#1F6FB2"},
-                 {x1:rp.A+w,x2:rp.dStart,label:`後退 ${rp.A.toFixed(2)}m`,color:"#2C7A55"},
-                 {x1:0,x2:rp.A,label:`緩和 ${rp.A.toFixed(2)}m（後退と同じ長さ）`,color:"#C0651A"},
+                 {x1:rp.A+w,x2:wallX,label:`後退 ${rp.ownA.toFixed(2)}m`,color:"#2C7A55"},
+                 {x1:0,x2:rp.A,label:`緩和 ${rp.A.toFixed(2)}m`,color:"#C0651A"},
                  {x1:0,x2:R.L,label:`適用距離 ${R.L}m`,color:"#5B3FD6"}],
-           notes:[`許容高さ ＝ ${R.k} ×（幅員 ${w} ＋ 後退 ${rp.A.toFixed(2)} × 2）`
+           notes:[`許容高さ ＝ ${R.k} ×（幅員 ${w} ＋ 最も近い棟の後退 ${rp.A.toFixed(2)} × 2）`
                   +`　建物の見付け ${sectionDepth(bT,edgeGeom(i)).toFixed(1)}m`
-                  +(blds.length>1?`　断面は ${esc(pick.bb.name)}`:""),
+                  +(blds.length>1?`　断面は ${esc(pick.bb.name)}（自身の後退 ${rp.ownA.toFixed(2)}m）`:""),
                   rp.beyond?`建物は適用距離 ${R.L}m の外にあるため制限を受けません`
                    :(rp.ok?`余裕 ${(rp.allow-bT.H).toFixed(2)} m`:`超過 ${(bT.H-rp.allow).toFixed(2)} m`)]}),
           "road"+i, `道路斜線 辺${i+1}（幅員 ${w}m）`)
@@ -1615,29 +1747,38 @@ function judgeAll(){
       const ngs=act.filter(o=>!o.r.ok);
       ngs.forEach(o=>{rinNG=true;bad.add(o.bi);
         if(o.r.poly&&o.r.poly.length>=3)(over[o.bi]=over[o.bi]||[]).push({poly:o.r.poly,kind:"rin",i});});
-      const cr=critical[i], pick=(cr&&act.find(o=>o.bi===cr.bi))||act[0];
+      const pick=pickCritical(act);
       const rp=pick.r, bT=BG(pick.bb), RR=rp.RR;
       const under=rs.filter(o=>o.r.under);
       const allNG=act.every(o=>!o.r.ok);
+      // road側と同じ理由で、壁の位置は描画対象の棟「自身」の後退距離
+      // （水面等の緩和ぶんを含む）を使う。起点(x=0)自体は敷地内で最も
+      // 隣地境界線に近い棟の後退距離(rp.A)で決まる。
+      const cf=ETYPE[e.type];
+      const bonus=cf.rin==="half"?(+e.width||0)/2:0;
+      const ownA2=rp.ownA+bonus;
+      const wallX=rp.A+ownA2;
+      const usesOtherBuilding=Math.abs(ownA2-rp.A)>1e-6;
       rinHtml+=`<div style="margin-top:9px;border-top:1px solid var(--line);padding-top:7px">
         <div class="ttl"><b>辺${i+1}（${ETYPE[e.type].name}）</b>
           <span class="badge ${ngs.length?"b-ng":"b-ok"}">${ngs.length?(allNG?"超過":"一部超過"):"適合"}</span></div>
         <div class="kv"><span>後退距離 d は棟ごとに測定<button class="q" data-h="setback" style="margin-left:3px">?</button></span>
           <span>立ち上がり ${RR.H0} m</span></div>
         ${rows(act)}
-        ${under.length?`<div style="color:var(--muted)">${under.map(o=>esc(o.bb.name)).join("・")} は立ち上がり高さ ${RR.H0}m 以下のため対象外</div>`:""}`
+        ${under.length?`<div style="color:var(--muted)">${under.map(o=>esc(o.bb.name)).join("・")} は立ち上がり高さ ${RR.H0}m 以下のため対象外</div>`:""}
+        ${usesOtherBuilding?`<div class="note" style="margin-top:4px">許容高さの起点は、敷地内で最も隣地境界線に近い棟の後退距離（${rp.A.toFixed(2)}m）を敷地内の全ての棟に共通して使います（法56条2項）。</div>`:""}`
         +foldSec(rp.ok?"断面図を見る（適合）":"断面図を見る（超過部分）",
-          sectionSVG({k:RR.k,H0:RR.H0,H:bT.H,allow:rp.allow,x0:0,bx:2*rp.A,
+          sectionSVG({k:RR.k,H0:RR.H0,H:bT.H,allow:rp.allow,x0:0,bx:wallX,
            bw:sectionDepth(bT,edgeGeom(i)),ok:rp.ok,
-           spanX:2*rp.A+sectionDepth(bT,edgeGeom(i)),
+           spanX:wallX+sectionDepth(bT,edgeGeom(i)),
            verticals:[{x:0,label:"起点",color:"#C0651A"},
                       {x:rp.A,label:"敷地境界線",color:"#C0392B",dash:"1 0"},
-                      {x:2*rp.A,label:"建物外壁",color:"#7A736A"}],
-           dims:[{x1:rp.A,x2:2*rp.A,label:`後退 ${rp.A.toFixed(2)}m`,color:"#2C7A55"},
-                 {x1:0,x2:rp.A,label:`緩和 ${rp.A.toFixed(2)}m（後退と同じ長さ）`,color:"#C0651A"}],
-           notes:[`許容高さ ＝ ${RR.H0} ＋ ${RR.k} ×（後退 ${rp.A.toFixed(2)} × 2）`
+                      {x:wallX,label:`建物外壁${usesOtherBuilding?"（"+esc(pick.bb.name)+"）":""}`,color:"#7A736A"}],
+           dims:[{x1:rp.A,x2:wallX,label:`後退 ${rp.ownA.toFixed(2)}m`,color:"#2C7A55"},
+                 {x1:0,x2:rp.A,label:`緩和 ${rp.A.toFixed(2)}m`,color:"#C0651A"}],
+           notes:[`許容高さ ＝ ${RR.H0} ＋ ${RR.k} ×（最も近い棟の後退 ${rp.A.toFixed(2)} × 2）`
                   +`　建物の見付け ${sectionDepth(bT,edgeGeom(i)).toFixed(1)}m`
-                  +(act.length>1?`　断面は ${esc(pick.bb.name)}`:""),
+                  +(act.length>1?`　断面は ${esc(pick.bb.name)}（自身の後退 ${rp.ownA.toFixed(2)}m）`:""),
                   rp.ok?`余裕 ${(rp.allow-bT.H).toFixed(2)} m`:`超過 ${(bT.H-rp.allow).toFixed(2)} m`]}),
           "rin"+i, `隣地斜線 辺${i+1}（${ETYPE[e.type].name}）`)
         +"</div>";
@@ -1698,19 +1839,31 @@ function judgeAll(){
       　地図と3Dの<b>赤い部分</b>が超過している範囲です。</div>
       <div style="color:var(--muted);margin-top:3px">斜線超過は<b>天空率</b>で適合できる場合があります
       <button class="q" data-h="sky" style="margin-left:2px">?</button></div>`:""}
-    ${roadAny?"":'<div style="color:var(--ng);margin-top:5px"><b>道路に接する辺が入力されていません。</b>接道義務（法43条）を満たしているか確認してください。</div>'}
-    ${HJ.state==="wait"?'<div style="color:var(--sun);margin-top:5px">日影規制は「日影図」タブで計算すると判定できます。</div>':""}`;
+    ${roadAny?"":'<div style="color:var(--ng);margin-top:5px"><b>道路に接する辺が入力されていません。</b>接道義務（法43条）を満たしているか確認してください。</div>'}`;
+  // タブを開かなくても結果が見えるよう、上部の常設ボタンの下にも同じ判定を
+  // 1行で要約して出す（③斜線タブのjsumカードと内容は同じ）。
+  const quickEl=$("judgeQuick");
+  if(quickEl){
+    quickEl.innerHTML=
+     `<span class="badge ${allOK?"b-ok":"b-ng"}" style="margin-right:6px">${allOK?"すべて適合":"超過あり"}</span>`
+     +`建蔽率${okB?"○":"×"}　容積率${okF?"○":"×"}　`
+     +`道路斜線${roadAny?(roadNG?"×":"○"):"要確認"}　隣地斜線${rinAny?(rinNG?"×":"○"):"—"}　`
+     +`日影規制${HJ.state==="ok"?"○":HJ.state==="ng"?"×":"—"}`;
+  }
   setMark("mk3",(okB&&okF&&slopeOK)?"ok":"ng");
   setMark("mk4",HJ.state==="ng"?"ng":HJ.state==="ok"?"ok":null);
   printSecs=printSecs.filter(x=>SECPOOL[x.key]);
   buildBList();drawAll();
 }
 $("judge").onclick=()=>{
+  // タブを開かずに押せる唯一の判定ボタンなので、キャッシュ済みlastGridの
+  // 有無に関わらず毎回計算し直す（等時間日影線を計算ボタンを廃止した分、
+  // dt・測定面高さ・規制時間の変更もここで確実に拾う）。
   document.body.classList.add("busy");$("judge").disabled=true;
   setTimeout(()=>{try{
-    if(!lastGrid&&siteArea()&&blds.length){
+    if(siteArea()&&blds.length){
       const g=computeIso();
-      if(g.err)$("out").innerHTML=g.err; else {lastGrid=g;drawIso(g);fillOut(g);}
+      if(g.err){$("out").innerHTML=g.err;lastGrid=null;} else {lastGrid=g;drawIso(g);fillOut(g);}
     }
     judgeAll();
   }finally{document.body.classList.remove("busy");$("judge").disabled=false;}},30);
@@ -1840,7 +1993,7 @@ function manualSourceNoteHTML(ER){
     <button class="q" data-h="hikout" style="margin-left:2px">?</button></div>`;
 }
 /* QGISプラグイン(_qgis)が付加した、複数用途地域の内訳・影が落ちる先の
-   区域の判定を、①敷地タブ・③判定タブの参考カードに表示する。プラグイン
+   区域の判定を、①敷地タブ・③斜線タブの参考カードに表示する。プラグイン
    経由で開いたJSON/HTMLでなければ(QGIS_METAがnull)何も表示しない。
    容積率・建蔽率の按分値自体はd.far/d.bcr（zone/far/bcr欄）に既に反映
    済みなので、ここはあくまで「なぜその数字なのか」の内訳表示。 */
@@ -1974,20 +2127,9 @@ function syncLevels(){
   $("lg5").textContent=`${HR.t1}時間 等時間日影線（5m超10m以内）`;
   $("lg3").textContent=`${HR.t2}時間 等時間日影線（10m超）`;
 }
-$("calc").onclick=()=>{
-  syncLevels();
-  document.body.classList.add("busy");$("calc").disabled=true;
-  setTimeout(()=>{try{
-    const g=computeIso();
-    if(g.err){$("out").innerHTML=g.err;lastGrid=null;return;}
-    lastGrid=g;drawIso(g);
-    const HJ=hikageJudge(),va=drawViolation(HJ);
-    $("outj").innerHTML=hikageCardHTML(HJ,va);
-    fillOut(g);
-    setMark("mk4",HJ.state==="ng"?"ng":HJ.state==="ok"?"ok":null);
-    drawAll();
-  }finally{document.body.classList.remove("busy");$("calc").disabled=false;}},30);
-};
+/* 等時間日影線を計算ボタンは廃止（設計変更）。上部の「すべて判定する」
+   （$("judge").onclick）が毎回computeIso()をやり直すため、日影図タブは
+   その結果（lastGrid）を表示するだけになった。 */
 
 /* ===== [14] ダイヤル・換算表 ===== */
 function buildDial(){
@@ -2028,8 +2170,11 @@ const HELP={
    パワーポイントの図形と同じ感覚です。数値で入れたいときは下の入力欄から。<br>
    <b>複数棟</b>置けます。一覧から選ぶと編集対象が切り替わります。</div>
   <h5>③ まとめて判定</h5>
-  <div class="step"><b>「すべて判定する」</b>で5項目を一度に計算します。日影がまだなら自動で計算します。<br>
-   斜線を超えている棟は一覧と地図で赤くなり、<b>超過している平面範囲</b>が地図と3Dに赤く表示されます。</div>
+  <div class="step">タブの上に常設された<b>「すべて判定する」</b>で5項目（建蔽率・容積率・道路斜線・隣地斜線・日影規制）を
+   一度に計算します。日影も毎回自動で計算し直すので、どのタブを開いていても押すだけで最新の結果になります。
+   ボタンの下に結果の要約が出るので、タブを開かなくても適合・超過が分かります。<br>
+   斜線を超えている棟は一覧と地図で赤くなり、<b>超過している平面範囲</b>が地図と3Dに赤く表示されます
+   （詳しくは「③斜線」タブ）。</div>
   <h5>3Dプレビュー</h5>
   <p>右下に立体で表示します。<b>ドラッグで回転、Shift＋ドラッグで平行移動、ホイールで拡大縮小、ダブルクリックで初期視点に戻る</b>。
   初期視点は北が画面の奥です。斜線超過部分は屋上に赤く出ます。</p>
@@ -2188,6 +2333,26 @@ const HELP={
  json:["JSONでの保存・読み込み",`
   <p>敷地の頂点・各辺の条件・<b>すべての建物</b>・用途地域・計算設定・タイトルを1ファイルに保存します。
   計算結果は保存されないので、読み込み後に再計算してください。</p>`],
+ kml:["KMLで書き出す（Google Earth）",`
+  <p>敷地を平面のポリゴン、各建物を<b>高さぶん立ち上げた立体</b>（<code>&lt;extrude&gt;</code>）として
+  KMLファイルに書き出します。Google Earthで開くと、周辺の建物や地形と重ねて大きさ・見え方を確認できます。</p>
+  <p><b>「斜線制限（参考）」フォルダ</b>には、辺ごとの道路斜線・隣地斜線の規制面を、傾いた板（面）として
+  1枚ずつ書き出します。<b>後退距離による緩和（法56条2項）</b>を反映していますが、敷地内に複数の建物がある
+  場合、この緩和は<b>棟ごとではなく、その辺に最も近い棟の後退距離を敷地内の全ての棟に共通して使います</b>
+  （1棟だけ大きく後退させても、他の棟が道路や隣地に近いままなら、緩和の起点はその近い棟の位置のままです）。
+  面は敷地全体で辺ごとに1枚なので、③斜線タブの許容高さの数値と一致するはずです。建物を置く前は、
+  後退なし（最も厳しい側）の面だけを1組表示します。建物がこの面を突き抜けていれば、その辺の斜線を
+  超えていることが立体で確認できます（数値としての適合・超過の判定は③斜線タブの結果を優先してください。
+  ここはあくまで見た目の参考です）。</p>
+  <p>後退距離が大きく<b>適用距離の外</b>になった道路斜線の辺も、面は消さずにそのまま描きます
+  （名前に「適用距離外のため制限なし」と付きます）。建物が面の先端（適用距離の位置）より
+  後ろにあるために制限を受けない、ということが立体でそのまま確認できるようにするためです。</p>
+  <p>建物の高さは階数×階高＋屋上等の加算をそのまま使い、地盤の高低差（このアプリでは非対応）は考慮していません。
+  そのため実際の標高とは合わないことがあります。あくまで<b>周辺との相対的なボリューム感</b>を見るための書き出しです。</p>
+  <p style="color:var(--muted)">水面や地形の起伏が大きい場所では、Google Earth側の地形データの細かい凹凸により、
+  立体の面がやや波打って見えることがあります（見た目だけの問題で、書き出している形自体は正しい直方体・平面です）。
+  気になる場合はGoogle Earthの設定で「3D建物」「写真の3D表示」レイヤーを一時的にオフにすると、
+  すっきり表示されることがあります。</p>`],
  print:["A4で印刷",`
   <ol><li>タイトルと備考を入れて「A4印刷プレビューを開く」。</li>
   <li>用紙の縦横を切替、「図を用紙に合わせる」で全体を収め、−／＋で0.25段階の微調整。</li>
@@ -2196,7 +2361,7 @@ const HELP={
   <p>印刷ダイアログの<b>レイアウト（縦／横）</b>は、このアプリの「用紙：縦／横」と合わせてください。
   食い違うと図が用紙に収まりません。</p>
   <h5>断面図を図面に載せる</h5>
-  <p><b>③判定タブ</b>で「断面図を見る」を開き、<b>「この図をA4図面に入れる」</b>にチェックすると、
+  <p><b>③斜線タブ</b>で「断面図を見る」を開き、<b>「この図をA4図面に入れる」</b>にチェックすると、
   印刷プレビューにその図が置かれます。必要なものだけを選べます。</p>
   <p>プレビュー上での操作</p>
   <ul>
@@ -2344,6 +2509,191 @@ function saveJSON(){
 }
 window.saveJSON=saveJSON;
 $("save").onclick=saveJSON;
+
+/* ===== KMLの書き出し（Googleアース用） ===== */
+/* 敷地=平面ポリゴン、建物=高さぶん立ち上げた立体(extrude)。地盤の高低差は
+   非対応なので、標高は常に0m起点（altitudeMode=relativeToGround）で扱う。 */
+function ringToKmlCoords(pts,alt){
+  // ptsはローカルXY([x,y]の配列)。閉じたリングにするため始点を末尾にも足す。
+  const closed=pts.concat([pts[0]]);
+  return closed.map(p=>{const[lat,lng]=ll(p[0],p[1]);return `${lng.toFixed(8)},${lat.toFixed(8)},${alt}`;}).join(" ");
+}
+function toKML(){
+  const title=esc($("ttl").value||"日影図・高さ制限検討図");
+  const parts=[
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>',
+    `<name>${title}</name>`,
+    // 建物は塗りつぶしをほぼ不透明にする（半透明のままだと、奥の壁が手前の壁を
+    // 透けて見えてモアレ状の「ガビガビ」に見えることがあるため。半透明の面同士が
+    // 重なって見えるのが原因で、水面など地形が細かく波打つ場所ではrelativeToGround
+    // の押し出しがわずかに歪むこととも重なって見た目が荒れやすい）。
+    '<Style id="siteStyle"><LineStyle><color>ff3a5ae0</color><width>2</width></LineStyle>'
+      +'<PolyStyle><color>4d3a5ae0</color><fill>1</fill><outline>1</outline></PolyStyle></Style>',
+    '<Style id="bldStyle"><LineStyle><color>ff1414c8</color><width>1.5</width></LineStyle>'
+      +'<PolyStyle><color>e61414c8</color><fill>1</fill><outline>1</outline></PolyStyle></Style>',
+    '<Style id="slantStyle"><LineStyle><color>ff00a5ff</color><width>1</width></LineStyle>'
+      +'<PolyStyle><color>8800a5ff</color><fill>1</fill><outline>1</outline></PolyStyle></Style>',
+  ];
+  if(site&&site.length>=3){
+    parts.push('<Placemark><name>敷地</name><styleUrl>#siteStyle</styleUrl>'
+      +'<Polygon><extrude>0</extrude><altitudeMode>relativeToGround</altitudeMode><tessellate>1</tessellate>'
+      +`<outerBoundaryIs><LinearRing><coordinates>${ringToKmlCoords(site,0)}</coordinates></LinearRing></outerBoundaryIs>`
+      +'</Polygon></Placemark>');
+  }
+  blds.forEach(b=>{
+    const g=BG(b),cs=corners(g);
+    const desc=`階数${b.nf}／階高${b.fh}m／高さ${g.H.toFixed(2)}m`;
+    parts.push(`<Placemark><name>${esc(b.name)}</name><description>${esc(desc)}</description><styleUrl>#bldStyle</styleUrl>`
+      +'<Polygon><extrude>1</extrude><altitudeMode>relativeToGround</altitudeMode><tessellate>1</tessellate>'
+      +`<outerBoundaryIs><LinearRing><coordinates>${ringToKmlCoords(cs,g.H)}</coordinates></LinearRing></outerBoundaryIs>`
+      +'</Polygon></Placemark>');
+  });
+  const slantKml=slantEnvelopeKML();
+  if(slantKml)parts.push(slantKml);
+  parts.push('</Document></kml>');
+  return parts.join("\n");
+}
+/* 道路斜線・隣地斜線の規制面を、傾いた1枚の矩形平面（のリスト）として返す
+   （辺ごとに、道路斜線なら1枚、隣地斜線なら「立上り」＋「斜め」の2枚）。
+   計算式は判定タブ（③斜線）が使っているroadRule/rinRuleと同じものを使う。
+   水面・線路敷等/公園・広場のみなし境界の緩和（幅員の半分）も反映するが、
+   日影規制のみなし境界緩和とは別物（斜線用と日影用で緩和量の規則が違う）。
+   地盤の高低差は非対応のため、すべて敷地レベル（高さ0）を基準とした平面。
+   quadの各点はローカルXY＋高さ(z)の[x,y,z]。KML出力(slantEnvelopeKML)と
+   3Dプレビューの斜線面表示(draw3D)の両方がこの関数を使う。計算式が2箇所に
+   分かれて食い違うことのないよう、幾何計算はここ1箇所にまとめる。 */
+function slantEnvelopeQuads(){
+  if(!site||site.length<3)return[];
+  const heights=blds.map(b=>BG(b).H);
+  const HCAP=Math.max(60,...heights)+10; // 見やすさのための高さ上限（適用距離内でもここで打ち切る）
+  const out=[];
+  const push=(quad,kind,label)=>out.push({quad,kind,label});
+
+  if(!blds.length){
+    // 建物がまだ無いときは、後退なし(A=0)の基準線（＝最も厳しい側）だけを示す。
+    const z=$("zone").value,f=+$("far").value;
+    edges.forEach((e,i)=>{
+      if(!e)return;
+      const cf=ETYPE[e.type],g=edgeGeom(i),w=+e.width||0;
+      if(e.type==="road"){
+        if(!(w>0))return;
+        const R=roadRule(z,f);
+        const dmax=Math.min(R.L,HCAP/R.k);
+        if(dmax<=0)return;
+        const p0a=[g.a[0]+g.n[0]*w,g.a[1]+g.n[1]*w], p0b=[g.b[0]+g.n[0]*w,g.b[1]+g.n[1]*w];
+        const p1a=[p0a[0]-g.n[0]*dmax,p0a[1]-g.n[1]*dmax], p1b=[p0b[0]-g.n[0]*dmax,p0b[1]-g.n[1]*dmax];
+        push([[p0a[0],p0a[1],0],[p0b[0],p0b[1],0],[p1b[0],p1b[1],R.k*dmax],[p1a[0],p1a[1],R.k*dmax]],
+          "road",`道路斜線 辺${i+1}（後退なし）`);
+        return;
+      }
+      if(cf.rin==="road")return;
+      const RR=rinRule(z);
+      const bonus=cf.rin==="half"?w/2:0;
+      // 後退A=0でも、水面等/公園広場の緩和ぶん(2×bonus)は起点が外側にずれる
+      // （allow=H0+k*2*(0+bonus) と一致させるため。§検証済み）。
+      const originOutward=2*bonus;
+      const baseA=[g.a[0]+g.n[0]*originOutward,g.a[1]+g.n[1]*originOutward];
+      const baseB=[g.b[0]+g.n[0]*originOutward,g.b[1]+g.n[1]*originOutward];
+      if(HCAP<=RR.H0){
+        push([[baseA[0],baseA[1],0],[baseB[0],baseB[1],0],[baseB[0],baseB[1],HCAP],[baseA[0],baseA[1],HCAP]],
+          "rin",`隣地斜線 辺${i+1}（後退なし）`);
+      }else{
+        push([[baseA[0],baseA[1],0],[baseB[0],baseB[1],0],[baseB[0],baseB[1],RR.H0],[baseA[0],baseA[1],RR.H0]],
+          "rin",`隣地斜線 辺${i+1}（後退なし・立上り）`);
+        const dmax=(HCAP-RR.H0)/RR.k;
+        const p1a=[baseA[0]-g.n[0]*dmax,baseA[1]-g.n[1]*dmax], p1b=[baseB[0]-g.n[0]*dmax,baseB[1]-g.n[1]*dmax];
+        push([[baseA[0],baseA[1],RR.H0],[baseB[0],baseB[1],RR.H0],[p1b[0],p1b[1],HCAP],[p1a[0],p1a[1],HCAP]],
+          "rin",`隣地斜線 辺${i+1}（後退なし・斜め）`);
+      }
+    });
+    return out;
+  }
+  // 敷地内の後退距離（法56条2項の緩和込み）を反映した面を、辺ごとに1枚
+  // 描く。この緩和は棟ごとではなく敷地内で最も近い棟の後退距離を敷地内の
+  // 全ての棟に共通して用いる（slopeCheck参照）ため、面も棟ごとではなく
+  // 辺ごとに1枚で済む（以前は棟ごとに分けていたが、緩和の起点は結局
+  // 敷地内で共通の値になるため同じ面が重複していた）。
+  // A・allow等はslopeCheck()をそのまま使い、③斜線タブの数値と食い違わないようにする。
+  const SB=allSetbacks();
+  edges.forEach((e,i)=>{
+    if(!e)return;
+    const cf=ETYPE[e.type],g=edgeGeom(i),w=+e.width||0;
+    const rp=slopeCheck(0,i,SB); // A・allow・beyondは敷地内で共通なので代表として0番目の棟で求める
+    if(!rp)return; // 幅員未入力の道路辺など、対象外の辺
+    if(rp.kind==="road"){
+      // 適用距離の外（rp.beyond、③斜線タブの「建物は適用距離◯mの外に
+      // あるため制限を受けません」と同じ判定）でも、面自体は描く。
+      // 「面の先端（適用距離の位置）より建物が後ろにあるから制限を受けない」
+      // ことが見えるのに意味があるため、面を消してしまわない。
+      const originOutward=rp.w+rp.A; // 検証済み: dStart=w+2A のとき起点はw+A外側
+      // 適用距離Lは、この起点（緩和込みの道路反対側線）からの距離としてすでに
+      // 判定に使われている（元コード: dStart=w+2A を直接R.Lと比較）ので、
+      // 面もLをそのまま「起点からの距離の上限」として使う（境界線からの
+      // 残り距離に換算し直す必要はない）。
+      const dmax=Math.min(rp.R.L,HCAP/rp.R.k);
+      if(dmax<=0)return;
+      const p0a=[g.a[0]+g.n[0]*originOutward,g.a[1]+g.n[1]*originOutward];
+      const p0b=[g.b[0]+g.n[0]*originOutward,g.b[1]+g.n[1]*originOutward];
+      const p1a=[p0a[0]-g.n[0]*dmax,p0a[1]-g.n[1]*dmax];
+      const p1b=[p0b[0]-g.n[0]*dmax,p0b[1]-g.n[1]*dmax];
+      const label=rp.beyond
+        ?`道路斜線 辺${i+1}（最も近い棟の後退${rp.A.toFixed(2)}m・適用距離外のため制限なし）`
+        :`道路斜線 辺${i+1}（最も近い棟の後退${rp.A.toFixed(2)}m反映）`;
+      push([[p0a[0],p0a[1],0],[p0b[0],p0b[1],0],[p1b[0],p1b[1],rp.R.k*dmax],[p1a[0],p1a[1],rp.R.k*dmax]],
+        "road",label);
+    }else{
+      const RR=rp.RR;
+      const bonus=cf.rin==="half"?w/2:0;
+      const originOutward=rp.A+bonus; // 検証済み: allow=H0+2k(A+bonus) のとき起点はA+2bonus外側＝A2+bonus
+      const baseA=[g.a[0]+g.n[0]*originOutward,g.a[1]+g.n[1]*originOutward];
+      const baseB=[g.b[0]+g.n[0]*originOutward,g.b[1]+g.n[1]*originOutward];
+      if(HCAP<=RR.H0){
+        push([[baseA[0],baseA[1],0],[baseB[0],baseB[1],0],[baseB[0],baseB[1],HCAP],[baseA[0],baseA[1],HCAP]],
+          "rin",`隣地斜線 辺${i+1}（最も近い棟の後退${rp.A.toFixed(2)}m反映）`);
+      }else{
+        push([[baseA[0],baseA[1],0],[baseB[0],baseB[1],0],[baseB[0],baseB[1],RR.H0],[baseA[0],baseA[1],RR.H0]],
+          "rin",`隣地斜線 辺${i+1}（最も近い棟の後退${rp.A.toFixed(2)}m反映・立上り）`);
+        const dmax=(HCAP-RR.H0)/RR.k;
+        const p1a=[baseA[0]-g.n[0]*dmax,baseA[1]-g.n[1]*dmax], p1b=[baseB[0]-g.n[0]*dmax,baseB[1]-g.n[1]*dmax];
+        push([[baseA[0],baseA[1],RR.H0],[baseB[0],baseB[1],RR.H0],[p1b[0],p1b[1],HCAP],[p1a[0],p1a[1],HCAP]],
+          "rin",`隣地斜線 辺${i+1}（最も近い棟の後退${rp.A.toFixed(2)}m反映・斜め）`);
+      }
+    }
+  });
+  return out;
+}
+/* slantEnvelopeQuads()の結果をKMLのPlacemarkに変換するだけの薄いラッパー。 */
+function slantEnvelopeKML(){
+  const quads=slantEnvelopeQuads();
+  if(!quads.length)return"";
+  const parts=quads.map(({quad,label})=>{
+    const ring=quad.concat([quad[0]]).map(([x,y,z])=>{
+      const[lat,lng]=ll(x,y);
+      return `${lng.toFixed(8)},${lat.toFixed(8)},${z.toFixed(2)}`;
+    }).join(" ");
+    return `<Placemark><name>${esc(label)}</name><styleUrl>#slantStyle</styleUrl>`
+      +'<Polygon><extrude>0</extrude><altitudeMode>relativeToGround</altitudeMode><tessellate>1</tessellate>'
+      +`<outerBoundaryIs><LinearRing><coordinates>${ring}</coordinates></LinearRing></outerBoundaryIs>`
+      +'</Polygon></Placemark>';
+  });
+  const folderName=blds.length?"斜線制限（参考）":"斜線制限（参考・建物未配置のため後退なし）";
+  return `<Folder><name>${folderName}</name>${parts.join("\n")}</Folder>`;
+}
+function saveKML(){
+  if(!site||site.length<3){
+    $("jsonmsg").innerHTML='<b style="color:var(--ng)">先に①敷地タブで敷地を作図してください。</b>';
+    return;
+  }
+  const name=($("ttl").value||"日影図").replace(/[\\/:*?"<>|]/g,"_")+"_"+new Date().toISOString().slice(0,10)+".kml";
+  const blob=new Blob([toKML()],{type:"application/vnd.google-earth.kml+xml"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  $("jsonmsg").innerHTML=`<b style="color:var(--ok)">${esc(name)}</b> を保存しました（KML）。`;
+}
+window.saveKML=saveKML;
+$("saveKml").onclick=saveKML;
+
 $("load").onclick=()=>$("fin").click();
 $("fin").onchange=e=>{
   const f=e.target.files[0];if(!f)return;
@@ -2391,7 +2741,7 @@ document.addEventListener("keydown",e=>{
 
 /* ==========================================================
    [18b] 図面に載せる断面図
-   判定タブで選んだ図を、印刷プレビュー上に置く。
+   斜線タブで選んだ図を、印刷プレビュー上に置く。
    位置は用紙に対する割合で持つので、用紙の向きを変えても崩れない。
    ========================================================== */
 let printSecs=[];      // {key,x,y,w,flip}  x,y,w はオーバーレイに対する割合
@@ -2510,7 +2860,7 @@ function enterPrint(){
   renderSecs();
   $("pSecN").innerHTML=printSecs.length
     ?`断面図 ${printSecs.length} 枚`
-    :`<span style="color:var(--sun)">断面図なし（③判定タブで選択）</span>`;
+    :`<span style="color:var(--sun)">断面図なし（③斜線タブで選択）</span>`;
   setTimeout(()=>{map.invalidateSize();fitDrawing();showZoom();},60);}
 function exitPrint(){document.body.classList.remove("printmode");setTimeout(()=>map.invalidateSize(),60);}
 $("print").onclick=enterPrint;$("pExit").onclick=exitPrint;$("pFit").onclick=fitDrawing;

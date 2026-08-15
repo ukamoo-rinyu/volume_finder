@@ -112,12 +112,17 @@ def shadow_raster(
     cell: Optional[float] = None,
     max_grid_span: float = 150.0,
     phi_deg: float = 35.0,
+    extra_buildings: Optional[Sequence[dict]] = None,
 ) -> Optional[dict]:
-    """建物1棟について、日影時間のラスタ（HTMLの computeIso() の中核）を計算する。
+    """建物1棟（＋任意でextra_buildings）について、日影時間のラスタ
+    （HTMLの computeIso() の中核）を計算する。
 
-    段階3は「単純な直方体1棟のみ」という設計書8.3の既知の限界と一致する
-    スコープなので、複数棟の日影重なり処理（HTML版のmark配列による
-    タイムステップ内重複排除）は省いている。
+    extra_buildings: 同一敷地の他の棟（ver0.3.0、複数棟配置探索用）。
+    各要素は{"cx","cy","W","D","rot_deg","H"}。指定した場合、各時刻の
+    影マスクを主棟とextra_buildings全棟について求め、論理和(OR)してから
+    積算する——単純に時間を合算すると、同じ時刻に複数棟の影が同じ点に
+    重なった場合に二重計上してしまうため（法56条の2の規制は「その時刻に
+    影がかかっているか」の有無であって、棟数ではない）。
 
     deemed_boundary: 日影規制のみなし境界線（敷地形状を辺ごとの
     core.regulation.hikage_relax 分だけ外側にオフセットしたもの。
@@ -125,7 +130,7 @@ def shadow_raster(
 
     Returns {"X","Y" (格子座標), "total" (各セルの日影時間h), "dist"
     (みなし境界線までの距離), "measurable" (みなし境界線の外＝測定対象)}。
-    測定面より建物が低ければ None（影が生じない）。
+    測定面よりどの建物も低ければ None（影が生じない）。
 
     bands_from_raster() と組み合わせて使う: ラスタ自体（時刻ループを含む、
     最も重い部分）は測定面高さ(mh)ごとに1回だけ計算し、複数の区域
@@ -133,13 +138,23 @@ def shadow_raster(
     使い回すことで、区域数ぶんラスタ計算を繰り返さずに済む
     （設計書3.6・3.5、複数の日影規制区域を個別に判定するための土台）。
     """
-    eff_top = H - mh
-    if eff_top <= 0:
-        return None
+    raw = [{"cx": cx, "cy": cy, "W": W, "D": D, "rot_deg": rot_deg, "H": H}]
+    raw.extend(extra_buildings or [])
 
-    rot = rot_deg * _DEG
-    cos_r, sin_r = math.cos(rot), math.sin(rot)
-    hw, hd = W / 2.0, D / 2.0
+    bldgs = []
+    for b in raw:
+        eff_top = b["H"] - mh
+        if eff_top <= 0:
+            continue  # 測定面より低い棟は影を生じないので候補から外す
+        rot = b["rot_deg"] * _DEG
+        bldgs.append({
+            "cx": b["cx"], "cy": b["cy"],
+            "hw": b["W"] / 2.0, "hd": b["D"] / 2.0,
+            "cos_r": math.cos(rot), "sin_r": math.sin(rot),
+            "eff_top": eff_top,
+        })
+    if not bldgs:
+        return None
 
     xs = [p[0] for p in deemed_boundary]
     ys = [p[1] for p in deemed_boundary]
@@ -147,12 +162,12 @@ def shadow_raster(
     by0, by1 = min(ys), max(ys)
 
     worst_mult = max_shadow_multiplier(phi_deg)
-    margin = eff_top * worst_mult + max(hw, hd) + 4.0
+    margin = max(b["eff_top"] for b in bldgs) * worst_mult + max(max(b["hw"], b["hd"]) for b in bldgs) + 4.0
 
-    x0 = min(bx0, cx - hw) - margin
-    x1 = max(bx1, cx + hw) + margin
-    y0 = min(by0, cy - hd) - margin
-    y1 = max(by1, cy + hd) + margin
+    x0 = min(bx0, min(b["cx"] - b["hw"] for b in bldgs)) - margin
+    x1 = max(bx1, max(b["cx"] + b["hw"] for b in bldgs)) + margin
+    y0 = min(by0, min(b["cy"] - b["hd"] for b in bldgs)) - margin
+    y1 = max(by1, max(b["cy"] + b["hd"] for b in bldgs)) + margin
 
     span = max(x1 - x0, y1 - y0)
     if cell is None:
@@ -164,9 +179,10 @@ def shadow_raster(
     ys_grid = y0 + (np.arange(ny) + 0.5) * cell
     X, Y = np.meshgrid(xs_grid, ys_grid)  # shape (ny, nx)
 
-    gx, gy = X - cx, Y - cy
-    U = gx * cos_r - gy * sin_r
-    Vloc = gx * sin_r + gy * cos_r
+    for b in bldgs:
+        gx, gy = X - b["cx"], Y - b["cy"]
+        b["U"] = gx * b["cos_r"] - gy * b["sin_r"]
+        b["V"] = gx * b["sin_r"] + gy * b["cos_r"]
 
     inside = geo.point_in_polygon_mask(X, Y, deemed_boundary)
     dist = geo.point_to_polygon_distance(X, Y, deemed_boundary)
@@ -181,11 +197,14 @@ def shadow_raster(
         if sp is None:
             continue
         az, mult = sp
-        L2 = eff_top * mult
-        ex, ey = L2 * math.sin(az), L2 * math.cos(az)
-        ou = ex * cos_r - ey * sin_r
-        ov = ex * sin_r + ey * cos_r
-        mask = _shadow_mask(U, Vloc, ou, ov, hw, hd)
+        mask = None
+        for b in bldgs:
+            L2 = b["eff_top"] * mult
+            ex, ey = L2 * math.sin(az), L2 * math.cos(az)
+            ou = ex * b["cos_r"] - ey * b["sin_r"]
+            ov = ex * b["sin_r"] + ey * b["cos_r"]
+            m = _shadow_mask(b["U"], b["V"], ou, ov, b["hw"], b["hd"])
+            mask = m if mask is None else (mask | m)
         total += mask * dt_h
 
     return {"X": X, "Y": Y, "total": total, "dist": dist, "measurable": measurable}

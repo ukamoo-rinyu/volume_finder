@@ -40,3 +40,47 @@ class ResultTable(QTableWidget):
     def selected_row(self):
         rows = self.selectionModel().selectedRows() if self.selectionModel() else []
         return rows[0].row() if rows else None
+
+
+# ver0.3.0: 複数棟配置（分棟・L型）の結果表示。core.search.MultiCandidate用。
+MULTI_COLUMNS = [
+    "順位", "スコア", "A棟階数", "A棟高さ(m)", "B棟階数", "B棟高さ(m)",
+    "建築面積合計(m²)", "延床面積合計(m²)", "容積率(%)", "建蔽率(%)",
+    "有効空地(m²)", "南面採光", "効いている制約",
+]
+
+
+class MultiResultTable(QTableWidget):
+    def __init__(self, parent=None):
+        super().__init__(0, len(MULTI_COLUMNS), parent)
+        self.setHorizontalHeaderLabels(MULTI_COLUMNS)
+        self.horizontalHeader().setSectionResizeMode(len(MULTI_COLUMNS) - 1, QHeaderView.Stretch)
+        self.verticalHeader().setVisible(False)
+        self.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.setSelectionBehavior(QTableWidget.SelectRows)
+
+    def set_results(self, candidates):
+        self.setRowCount(len(candidates))
+        for row, c in enumerate(candidates):
+            a, b = c.buildings[0], c.buildings[1]
+            values = [
+                str(c.rank),
+                f"{c.score:.2f}",
+                f"{a.floors}階",
+                f"{a.height:.1f}",
+                f"{b.floors}階",
+                f"{b.height:.1f}",
+                f"{c.footprint_area:,.1f}",
+                f"{c.floor_area:,.1f}",
+                f"{c.far_pct:.1f}",
+                f"{c.bcr_pct:.1f}",
+                f"{c.open_area:,.0f}（短辺{c.open_min_side:.1f}m）",
+                f"{c.light_ratio:.2f}",
+                "・".join(c.binding),
+            ]
+            for col, v in enumerate(values):
+                self.setItem(row, col, QTableWidgetItem(v))
+
+    def selected_row(self):
+        rows = self.selectionModel().selectedRows() if self.selectionModel() else []
+        return rows[0].row() if rows else None
