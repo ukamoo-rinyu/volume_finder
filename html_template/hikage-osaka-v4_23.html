@@ -378,6 +378,7 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
   <label><input type="checkbox" class="lchk" data-lyr="line5" checked><i style="border-color:#C81E1E"></i><span id="lg5">等時間日影線</span></label>
   <label><input type="checkbox" class="lchk" data-lyr="line3" checked><i style="border-color:#5B3FD6"></i><span id="lg3">等時間日影線</span></label>
   <label><input type="checkbox" class="lchk" data-lyr="viol" checked><i style="border-color:#C0392B;border-top-width:9px"></i>日影規制を超える範囲</label>
+  <label><input type="checkbox" class="lchk" data-lyr="viol2" checked><i style="border-color:#0D6E6E;border-top-width:9px"></i>終日日影の指導範囲</label>
   <label><input type="checkbox" class="lchk" data-lyr="over" checked><i style="border-color:#C0392B;border-top-style:dotted;border-top-width:6px"></i>斜線の超過部分</label>
   <label><input type="checkbox" class="lchk" data-lyr="setb" checked><i style="border-color:#2C7A55;border-top-style:dotted;border-top-width:4px"></i>後退距離の測線</label>
   <label><input type="checkbox" class="lchk" data-lyr="offset" checked><i style="border-color:#3F5670;border-top-style:dashed"></i>5m／10mライン</label>
@@ -530,6 +531,12 @@ body.printmode #sheetfoot{display:flex;align-items:flex-start;gap:5mm;font-size:
     <div id="outj" class="card">まだ計算していません。</div>
     <div id="out" class="card">敷地と建物を配置してから計算してください。</div>
 
+    <h3>終日日影の指導（大阪市・大規模建築物事前協議）<button class="q" data-h="shuujitsu">?</button></h3>
+    <p class="note">敷地境界線の外側で、<b>8時〜16時のあいだ1分も途切れず日影になっている点</b>（＝建物の北側にできる、終日ずっと影のままの帯・三角形の部分）があるかどうかを判定します。
+      法56条の2の日影規制（上の「日影規制」カード）とは別の基準で、測定面の高さも上とは異なります。</p>
+    <label class="chk"><input type="checkbox" id="shuuJyutaku"> 住宅70戸以上の計画である</label>
+    <div id="jshuu" class="card">—</div>
+
     <h3>計算の条件</h3>
     <div class="grid">
       <div class="f"><label>測定面の高さ (m)</label>
@@ -632,6 +639,11 @@ function segDist(x,y,a,b){
   let t=L2?((x-a[0])*dx+(y-a[1])*dy)/L2:0;t=Math.max(0,Math.min(1,t));
   return Math.hypot(x-(a[0]+t*dx),y-(a[1]+t*dy));}
 function polyDist(x,y,P){let m=Infinity;for(let i=0,n=P.length;i<n;i++)m=Math.min(m,segDist(x,y,P[i],P[(i+1)%n]));return m;}
+function segIntersect(p1,p2,p3,p4){
+  const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const d1=cr(p3,p4,p1),d2=cr(p3,p4,p2),d3=cr(p1,p2,p3),d4=cr(p1,p2,p4);
+  return((d1>0&&d2<0)||(d1<0&&d2>0))&&((d3>0&&d4<0)||(d3<0&&d4>0));
+}
 function hull(pts){
   const s=pts.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
   const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
@@ -639,21 +651,83 @@ function hull(pts){
   for(const q of s){while(lo.length>=2&&cr(lo[lo.length-2],lo[lo.length-1],q)<=0)lo.pop();lo.push(q);}
   for(let i=s.length-1;i>=0;i--){const q=s[i];while(up.length>=2&&cr(up[up.length-2],up[up.length-1],q)<=0)up.pop();up.push(q);}
   lo.pop();up.pop();return lo.concat(up);}
+function _segXY(p1,p2,p3,p4){
+  const d1x=p2[0]-p1[0],d1y=p2[1]-p1[1],d2x=p4[0]-p3[0],d2y=p4[1]-p3[1];
+  const den=d1x*d2y-d1y*d2x;
+  if(Math.abs(den)<1e-9)return null;
+  const t=((p3[0]-p1[0])*d2y-(p3[1]-p1[1])*d2x)/den;
+  const u=((p3[0]-p1[0])*d1y-(p3[1]-p1[1])*d1x)/den;
+  if(t>1e-6&&t<1-1e-6&&u>1e-6&&u<1-1e-6)return[p1[0]+t*d1x,p1[1]+t*d1y];
+  return null;
+}
+/* 自己交差したリング（隣接しない辺どうしが交差してしまった閉じた点列）を、
+   単純多角形に直す（実際に見つかった不具合: 幅30mの道路のような大きな
+   後退量を敷地の狭い部分に適用すると、境界線の各頂点は局所的には妥当な
+   位置にオフセットされていても、離れた頂点どうしが敷地の外側で交差して
+   「折り返し」ができてしまうことがあった——ミター結合の飛び出し対策
+   <tMax>だけでは防げない、頂点1つずつでは判定できない大域的な問題）。
+   このアプリはGEOSのbuffer()のような本格的な多角形ブール演算を持たない
+   ため、簡易な対応として: 非隣接な辺(i,j)が点Xで交差したら、Xを挟んだ
+   2つのループのうち面積が小さい方（折り返して飛び出した先端）を切り
+   落とし、大きい方（本来の境界線）だけを残す——を交差が無くなるまで
+   繰り返す。 */
+function resolveSelfIntersections(ring){
+  let poly=ring.slice();
+  for(let iter=0;iter<ring.length+4;iter++){
+    const n=poly.length;let hit=null;
+    for(let i=0;i<n&&!hit;i++)for(let j=i+1;j<n&&!hit;j++){
+      if(j===i||j===(i+1)%n||i===(j+1)%n)continue;
+      const pt=_segXY(poly[i],poly[(i+1)%n],poly[j],poly[(j+1)%n]);
+      if(pt)hit={i,j,pt};}
+    if(!hit)break;
+    const{i,j,pt}=hit;
+    const loopA=[pt];for(let k=(i+1)%n;k!==(j+1)%n;k=(k+1)%n)loopA.push(poly[k]);
+    const loopB=[pt];for(let k=(j+1)%n;k!==(i+1)%n;k=(k+1)%n)loopB.push(poly[k]);
+    poly=Math.abs(area(loopA))>=Math.abs(area(loopB))?loopA:loopB;
+  }
+  return poly;
+}
+/* オフセット線どうしの結合方法（凸角＝ミター／凹角＝常に面取り）。
+
+   凹角（反射角、敷地が内側にへこんでいる頂点）を外側にオフセットすると、
+   2本のオフセット線は角の外側で必ず交わる（数学的にそういう性質がある）
+   —— が、その交点までの距離は角の鋭さ（凹み具合）に応じて際限なく
+   伸びる。敷地を凹ませるほど「5m／10mライン」が伸びていく、という
+   形で実際に見つかった不具合（幅の広い道路の後退量25mのように、
+   オフセット量に対して4倍などの倍率で上限を決めても、凹みを深くすれば
+   その上限にすらいずれ達してしまい、根本的な解決にならなかった）。
+
+   凹角では、そもそも鋭い交点を使う必要がない——2本のオフセット線を
+   そのまま短い線分でつなぐ「面取り」（2点）にしても、みなし境界線として
+   意味は変わらない（凹みの奥の形状は、外側からのオフセットには効いて
+   来ないため）上、面取り点は必ずオフセット量ぶんの距離に収まる
+   （角の鋭さに関係なく発散しない）。したがって凹角は常に面取りにする。
+
+   凸角（敷地が外側に出っ張っている頂点）は、鋭い角でもミターの交点が
+   有限に収まることが多いが、念のためミター長がオフセット量に対して
+   tMax（4倍、SVGのstroke-miterlimit既定値と同じ考え方）を超える場合は
+   面取りにフォールバックする。 */
 function offsetPolyPer(P,ts){
   const Q=ccw(P),n=Q.length,lines=[];
+  const eN=i=>{const a=Q[i],b=Q[(i+1)%n],dx=b[0]-a[0],dy=b[1]-a[1],L2=Math.hypot(dx,dy)||1;return[dy/L2,-dx/L2];};
   for(let i=0;i<n;i++){
     const a=Q[i],b=Q[(i+1)%n],dx=b[0]-a[0],dy=b[1]-a[1],L2=Math.hypot(dx,dy)||1;
     const nx=dy/L2,ny=-dx/L2,t=ts[i]||0;
     lines.push([[a[0]+nx*t,a[1]+ny*t],[b[0]+nx*t,b[1]+ny*t]]);}
   const out=[];
   for(let i=0;i<n;i++){
-    const p=lines[(i-1+n)%n],q=lines[i];
+    const p=lines[(i-1+n)%n],q=lines[i],v=Q[i];
+    const n1=eN((i-1+n)%n),n2=eN(i),cr=n1[0]*n2[1]-n1[1]*n2[0];
+    if(cr<=1e-9){out.push(p[1],q[0]);continue;}  // 凹角: 常に面取り（発散しない）
     const d1x=p[1][0]-p[0][0],d1y=p[1][1]-p[0][1],d2x=q[1][0]-q[0][0],d2y=q[1][1]-q[0][1];
     const den=d1x*d2y-d1y*d2x;
-    if(Math.abs(den)<1e-9){out.push(q[0]);continue;}
+    const tMax=4*Math.max(Math.abs(ts[(i-1+n)%n]||0),Math.abs(ts[i]||0),1e-6);
+    if(Math.abs(den)<1e-9){out.push(p[1],q[0]);continue;}
     const s=((q[0][0]-p[0][0])*d2y-(q[0][1]-p[0][1])*d2x)/den;
-    out.push([p[0][0]+s*d1x,p[0][1]+s*d1y]);}
-  return out;
+    const mx=p[0][0]+s*d1x,my=p[0][1]+s*d1y;
+    if(Math.hypot(mx-v[0],my-v[1])>tMax){out.push(p[1],q[0]);continue;}
+    out.push([mx,my]);}
+  return resolveSelfIntersections(out);
 }
 function offsetRound(P,t,stepDeg=6){
   const Q=ccw(P),n=Q.length,out=[];
@@ -666,16 +740,13 @@ function offsetRound(P,t,stepDeg=6){
       const k=Math.max(1,Math.ceil(d/(stepDeg*Math.PI/180)));
       for(let s=0;s<=k;s++){const a=a1+d*s/k;out.push([v[0]+t*Math.cos(a),v[1]+t*Math.sin(a)]);}
     }else{
-      const a=Q[(i-1+n)%n],c=Q[(i+1)%n];
-      const p1=[a[0]+n1[0]*t,a[1]+n1[1]*t],p2=[v[0]+n1[0]*t,v[1]+n1[1]*t];
-      const q1=[v[0]+n2[0]*t,v[1]+n2[1]*t],q2=[c[0]+n2[0]*t,c[1]+n2[1]*t];
-      const d1x=p2[0]-p1[0],d1y=p2[1]-p1[1],d2x=q2[0]-q1[0],d2y=q2[1]-q1[1];
-      const den=d1x*d2y-d1y*d2x;
-      if(Math.abs(den)<1e-9){out.push(q1);continue;}
-      const s=((q1[0]-p1[0])*d2y-(q1[1]-p1[1])*d2x)/den;
-      out.push([p1[0]+s*d1x,p1[1]+s*d1y]);}
+      // 凹角: offsetPolyPerと同じ理由で常に面取り（ミターは凹みが深いほど
+      // 際限なく伸びるため、距離チェックによるフォールバックでは根本解決に
+      // ならない。SVGのstroke-miterlimit相当の倍率チェックをやめ、常に
+      // 2本のオフセット線をそのまま繋ぐ）。
+      out.push([v[0]+n1[0]*t,v[1]+n1[1]*t],[v[0]+n2[0]*t,v[1]+n2[1]*t]);}
   }
-  return out;
+  return resolveSelfIntersections(out);
 }
 function clipPoly(P,f){
   const out=[];
@@ -751,6 +822,96 @@ function deemedPoly(){
   return offsetPolyPer(P,P.map((_,i)=>hikageRelax(edges[i])));
 }
 const siteArea=()=>{const P=sitePoly();return P?Math.abs(area(P)):0;};
+/* 建物（W/D/rot/cx/cy）が敷地の外へはみ出していないか。
+   敷地が未設定なら常にtrue（従来どおり無制限）。
+   四隅がすべて敷地内 かつ どの辺も敷地境界と交差しない、の両方で判定する
+   （敷地が凹形のときに「四隅は内側だが辺が外に食い込む」を見逃さないため）。 */
+function buildingFitsSite(b){
+  const P=sitePoly();
+  if(!P)return true;
+  const cs=corners(BG(b));
+  for(const c of cs)if(!inPoly(c[0],c[1],P))return false;
+  for(let i=0;i<4;i++){
+    const a1=cs[i],a2=cs[(i+1)%4];
+    for(let j=0,n=P.length;j<n;j++)
+      if(segIntersect(a1,a2,P[j],P[(j+1)%n]))return false;
+  }
+  return true;
+}
+/* ドラッグ中に敷地境界へ当たったとき、その場でピタッと止まる（＝マウスに
+   追従できなくなる）のではなく、境界に沿って滑るように動かすための処理。
+   curB（＝直前フレームの、必ず敷地に収まっている状態）から wantB（マウス
+   位置から素直に計算した、はみ出すかもしれない状態）へ向けて二分探索し、
+   「敷地に収まる範囲でもっとも wantB に近い状態」を返す。フレームごとに
+   直前の有効位置を起点にやり直すので、マウスが境界の外側に沿って動くと
+   結果としてハンドルも境界に沿って滑るように追従する。 */
+function slideToValid(curB,wantB){
+  if(buildingFitsSite(wantB))return wantB;
+  const changed=Object.keys(wantB).filter(k=>wantB[k]!==curB[k]);
+  // 平行移動だけのとき（移動ハンドル・本体ドラッグ・十字ボタン）は、
+  // 軸ごとに「行けるところまで」二分探索してから組み合わせる。斜めに壁へ
+  // 突っ込んでも、壁に沿った方向（もう一方の軸）の動きは殺さずに続け、
+  // 突き当たる軸のほうも壁のすぐ手前まで滑らせる。 */
+  if(changed.length&&changed.every(k=>k==="cx"||k==="cy")){
+    const dx=wantB.cx-curB.cx,dy=wantB.cy-curB.cy;
+    const bisectAxis=setter=>{
+      let lo=0,hi=1;
+      for(let i=0;i<8;i++){const mid=(lo+hi)/2;if(buildingFitsSite(setter(mid)))lo=mid;else hi=mid;}
+      return lo;
+    };
+    const tx=dx?bisectAxis(t=>({...curB,cx:curB.cx+dx*t,cy:curB.cy})):0;
+    const ty=dy?bisectAxis(t=>({...curB,cx:curB.cx,cy:curB.cy+dy*t})):0;
+    const onlyX={...curB,cx:curB.cx+dx*tx,cy:curB.cy},
+          onlyY={...curB,cx:curB.cx,cy:curB.cy+dy*ty};
+    const combined={...curB,cx:onlyX.cx,cy:onlyY.cy};
+    if(buildingFitsSite(combined))return combined;
+    return Math.abs(dx*tx)>=Math.abs(dy*ty)?onlyX:onlyY;
+  }
+  // 回転・大きさ変更は、直前の有効な状態から目標へ二分探索し、
+  // 敷地に収まる直前でなめらかに止める。
+  const lerp=t=>{
+    const o={};
+    Object.keys(wantB).forEach(k=>{
+      const a=curB[k],b=wantB[k];
+      o[k]=(typeof a==="number"&&typeof b==="number")?a+(b-a)*t:b;
+    });
+    return o;
+  };
+  let lo=0,hi=1;
+  for(let i=0;i<8;i++){
+    const mid=(lo+hi)/2;
+    if(buildingFitsSite(lerp(mid)))lo=mid;else hi=mid;
+  }
+  return lerp(lo);
+}
+/* 敷地内でもっとも境界から離れた点（凹んだ形でも中心が外にはみ出さないよう、
+   バウンディングボックスを粗く格子探索する）。新規棟の初期配置に使う。 */
+function bestInteriorPoint(P){
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  P.forEach(p=>{x0=Math.min(x0,p[0]);x1=Math.max(x1,p[0]);y0=Math.min(y0,p[1]);y1=Math.max(y1,p[1]);});
+  const n=24;let best=null,bestD=-Infinity;
+  for(let i=0;i<=n;i++)for(let j=0;j<=n;j++){
+    const x=x0+(x1-x0)*i/n,y=y0+(y1-y0)*j/n;
+    if(!inPoly(x,y,P))continue;
+    const d=polyDist(x,y,P);
+    if(d>bestD){bestD=d;best=[x,y];}
+  }
+  return best||[(x0+x1)/2,(y0+y1)/2];
+}
+/* 敷地があるとき、棟を敷地内のもっとも広い位置へ置き、はみ出すなら
+   縦横を少しずつ縮めて収まるまで繰り返す（新規作成・複製で使う）。 */
+function fitInSite(b){
+  const P=sitePoly();
+  if(!P)return;
+  const c=bestInteriorPoint(P);
+  b.cx=c[0];b.cy=c[1];
+  let n=0;
+  while(!buildingFitsSite(b)&&n<50){
+    b.W=Math.max(2,+(b.W*0.92).toFixed(2));
+    b.D=Math.max(2,+(b.D*0.92).toFixed(2));
+    n++;
+  }
+}
 
 /* ===== [6] 地図 ===== */
 const gsi=a=>L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/"+a+"/{z}/{x}/{y}."+(a==="seamlessphoto"?"jpg":"png"),
@@ -772,13 +933,14 @@ function setBase(k){
 }
 $("base").onchange=e=>setBase(e.target.value);
 L.control.scale({imperial:false,position:"bottomleft",maxWidth:140}).addTo(map);
-[["violPane",380],["shadowPane",400],["sitePane",410],["buildPane",420],["overPane",430],["linePane",440]]
+[["violPane",380],["viol2Pane",381],["shadowPane",400],["sitePane",410],["buildPane",420],["overPane",430],["linePane",440]]
   .forEach(([n,z])=>{map.createPane(n);map.getPane(n).style.zIndex=z;});
 map.getPane("violPane").style.pointerEvents="none";
+map.getPane("viol2Pane").style.pointerEvents="none";
 const rShadow=L.canvas({pane:"shadowPane"}),rSite=L.canvas({pane:"sitePane"}),
       rBuild=L.canvas({pane:"buildPane"}),rOver=L.canvas({pane:"overPane"}),
       rLine=L.canvas({pane:"linePane"});
-const gViol=L.layerGroup().addTo(map), gShadow=L.layerGroup().addTo(map),
+const gViol=L.layerGroup().addTo(map), gViol2=L.layerGroup().addTo(map), gShadow=L.layerGroup().addTo(map),
       gLine5=L.layerGroup().addTo(map), gLine3=L.layerGroup().addTo(map),
       gOffset=L.layerGroup().addTo(map), gSite=L.layerGroup().addTo(map),
       gBuild=L.layerGroup().addTo(map), gOver=L.layerGroup().addTo(map),
@@ -786,7 +948,7 @@ const gViol=L.layerGroup().addTo(map), gShadow=L.layerGroup().addTo(map),
       gHand=L.layerGroup().addTo(map), gSet=L.layerGroup().addTo(map),
       gLive=L.layerGroup().addTo(map),
       gDraw=L.layerGroup().addTo(map);
-const LYR={viol:[gViol],shadow:[gShadow,gLabel],line5:[gLine5],line3:[gLine3],over:[gOver],
+const LYR={viol:[gViol],viol2:[gViol2],shadow:[gShadow,gLabel],line5:[gLine5],line3:[gLine3],over:[gOver],
            setb:[gSet,gLive],offset:[gOffset],site:[gSite,gVtx],build:[gBuild,gHand]};
 function applyLayerVis(){
   document.querySelectorAll(".lchk").forEach(c=>{
@@ -813,10 +975,10 @@ function setMark(id,st){
   m.textContent=st==="ok"?"○":st==="ng"?"×":"";
 }
 function resetCalc(){
-  gLine5.clearLayers();gLine3.clearLayers();gViol.clearLayers();gOver.clearLayers();
+  gLine5.clearLayers();gLine3.clearLayers();gViol.clearLayers();gViol2.clearLayers();gOver.clearLayers();
   gSet.clearLayers();gLive.clearLayers();
   lastGrid=null;lastJudge=null;
-  ["jbcr","jvol","jroad","jrin","jhik"].forEach(id=>{if($(id))$(id).innerHTML="—";});
+  ["jbcr","jvol","jroad","jrin","jhik","jshuu"].forEach(id=>{if($(id))$(id).innerHTML="—";});
   $("jsum").innerHTML="まだ判定していません。";
   $("outj").innerHTML="まだ計算していません。";
   $("out").innerHTML="敷地と建物を配置してから計算してください。";
@@ -905,7 +1067,8 @@ function drawHandles(){
   hnd.move=L.marker(ll(b.cx,b.cy),{draggable:true,icon:L.divIcon({className:"",
     html:'<div class="hMove">✥</div>',iconSize:[0,0]})}).addTo(gHand)
     .on("dragstart",()=>{hDragging=true;})
-    .on("drag",e=>{const q=xy(e.latlng);blds[sel].cx=q[0];blds[sel].cy=q[1];lightDraw();})
+    .on("drag",e=>{const q=xy(e.latlng),nb=slideToValid(blds[sel],{...blds[sel],cx:q[0],cy:q[1]});
+      blds[sel].cx=nb.cx;blds[sel].cy=nb.cy;lightDraw();})
     .on("dragend",()=>{hDragging=false;resetCalc();syncForm();});
   // 大きさハンドル（4隅）
   cs.forEach((c,ci)=>{
@@ -934,7 +1097,10 @@ function drawHandles(){
       if(Math.hypot(dx,dy)<1)return;
       let r=Math.atan2(dx,dy)/D;
       r=((r+90)%180+180)%180-90;
-      blds[sel].rot=Math.round(r*10)/10;lightDraw();})
+      r=Math.round(r*10)/10;
+      const nb=slideToValid(blds[sel],{...blds[sel],rot:r});
+      blds[sel].rot=nb.rot;
+      lightDraw();})
     .on("dragend",()=>{hDragging=false;resetCalc();syncForm();});
 }
 let hDragging=false;
@@ -963,21 +1129,19 @@ function resizeByEdge(ei,p){
   const b=BG(blds[sel]);
   const u=uHat(b),v=vHat(b);
   const dx=p[0]-b.cx,dy=p[1]-b.cy;
+  let nb;
   if(ei===1||ei===3){                       // 幅（東西方向）を変える
     const su=(ei===1)?1:-1;
     const d=dx*u[0]+dy*u[1];
-    const nw=Math.max(2,su*d+b.W/2);
-    blds[sel].W=Math.round(nw*10)/10;
-    blds[sel].cx=b.cx+u[0]*su*(nw-b.W)/2;
-    blds[sel].cy=b.cy+u[1]*su*(nw-b.W)/2;
+    const nw=Math.round(Math.max(2,su*d+b.W/2)*10)/10;
+    nb={...blds[sel],W:nw,cx:b.cx+u[0]*su*(nw-b.W)/2,cy:b.cy+u[1]*su*(nw-b.W)/2};
   }else{                                     // 奥行（南北方向）を変える
     const sv=(ei===2)?1:-1;
     const d=dx*v[0]+dy*v[1];
-    const nd=Math.max(2,sv*d+b.D/2);
-    blds[sel].D=Math.round(nd*10)/10;
-    blds[sel].cx=b.cx+v[0]*sv*(nd-b.D)/2;
-    blds[sel].cy=b.cy+v[1]*sv*(nd-b.D)/2;
+    const nd=Math.round(Math.max(2,sv*d+b.D/2)*10)/10;
+    nb={...blds[sel],D:nd,cx:b.cx+v[0]*sv*(nd-b.D)/2,cy:b.cy+v[1]*sv*(nd-b.D)/2};
   }
+  Object.assign(blds[sel],slideToValid(blds[sel],nb));
 }
 function resizeByCorner(ci,p){
   const b=BG(blds[sel]);
@@ -985,10 +1149,11 @@ function resizeByCorner(ci,p){
   const u=uHat(b),v=vHat(b);
   const F=[b.cx-su*(b.W/2)*u[0]-sv*(b.D/2)*v[0], b.cy-su*(b.W/2)*u[1]-sv*(b.D/2)*v[1]];
   const dx=p[0]-F[0],dy=p[1]-F[1];
-  const nw=Math.max(2,Math.abs(dx*u[0]+dy*u[1])), nd=Math.max(2,Math.abs(dx*v[0]+dy*v[1]));
-  blds[sel].W=Math.round(nw*10)/10; blds[sel].D=Math.round(nd*10)/10;
-  blds[sel].cx=F[0]+su*(nw/2)*u[0]+sv*(nd/2)*v[0];
-  blds[sel].cy=F[1]+su*(nw/2)*u[1]+sv*(nd/2)*v[1];
+  const nw=Math.round(Math.max(2,Math.abs(dx*u[0]+dy*u[1]))*10)/10,
+        nd=Math.round(Math.max(2,Math.abs(dx*v[0]+dy*v[1]))*10)/10;
+  const nb={...blds[sel],W:nw,D:nd,
+    cx:F[0]+su*(nw/2)*u[0]+sv*(nd/2)*v[0], cy:F[1]+su*(nw/2)*u[1]+sv*(nd/2)*v[1]};
+  Object.assign(blds[sel],slideToValid(blds[sel],nb));
 }
 let bodyDrag=null, pickGuard=0;   // pickGuard：建物を触った直後の地図クリックを無視する時刻
 function startBodyDrag(i,ev){
@@ -1008,9 +1173,10 @@ function onBodyMove(ev){
     bodyDrag.moved=true;hDragging=true;
     if(sel!==bodyDrag.i)selectB(bodyDrag.i);
   }
-  const q=xy(ev.latlng);
-  blds[bodyDrag.i].cx=q[0]+bodyDrag.ox;
-  blds[bodyDrag.i].cy=q[1]+bodyDrag.oy;
+  const q=xy(ev.latlng),nx=q[0]+bodyDrag.ox,ny=q[1]+bodyDrag.oy;
+  const cur=blds[bodyDrag.i];
+  const nb=slideToValid(cur,{...cur,cx:nx,cy:ny});
+  cur.cx=nb.cx;cur.cy=nb.cy;
   lightDraw();
 }
 function endBodyDrag(){
@@ -1157,6 +1323,7 @@ function buildEdgeUI(){
 function addB(){
   const c=xy(map.getCenter());
   const b=newB(c[0],c[1]);
+  if(site&&site.length>=3)fitInSite(b);        // 敷地があれば、その中に収まる位置・大きさで作る
   b.name=String.fromCharCode(65+blds.length)+"棟";
   blds.push(b);sel=blds.length-1;
   buildBList();syncForm();resetCalc();
@@ -1165,6 +1332,7 @@ $("addb").onclick=addB;
 $("dupb").onclick=()=>{
   if(sel<0)return;
   const b={...blds[sel]};b.cx+=b.W*0.6;b.name=String.fromCharCode(65+blds.length)+"棟";
+  if(site&&site.length>=3&&!buildingFitsSite(b))fitInSite(b);   // ずらした先が敷地からはみ出すなら敷地内に置き直す
   blds.push(b);sel=blds.length-1;buildBList();syncForm();resetCalc();};
 function selectB(i){
   sel=i;
@@ -1201,18 +1369,25 @@ function syncForm(){
 FLD.forEach(([id,key,t])=>{
   $(id).addEventListener("input",()=>{
     if(sel<0)return;
-    blds[sel][key]= t==="n" ? (+$(id).value||0) : $(id).value;
+    const val= t==="n" ? (+$(id).value||0) : $(id).value;
+    if(key==="W"||key==="D"||key==="rot"){
+      const nb={...blds[sel],[key]:val};
+      if(buildingFitsSite(nb))blds[sel][key]=val;
+      else{$(id).value=blds[sel][key];return;}   // 敷地からはみ出す入力は反映せず、表示も元に戻す
+    }else blds[sel][key]=val;
     buildBList();resetCalc();});});
 document.querySelectorAll("[data-rot]").forEach(bt=>bt.onclick=()=>{
   if(sel<0)return;
   const d=+bt.dataset.rot;
   let r=d===0?0:blds[sel].rot+d;
   r=Math.max(-90,Math.min(90,Math.round(r*10)/10));
-  blds[sel].rot=r;$("brot").value=r;resetCalc();});
+  const nb=slideToValid(blds[sel],{...blds[sel],rot:r});
+  blds[sel].rot=nb.rot;$("brot").value=nb.rot;resetCalc();});
 document.querySelectorAll("[data-mv]").forEach(bt=>bt.onclick=()=>{
   if(sel<0)return;
   const[ex,ny]=bt.dataset.mv.split(",").map(Number),s=+$("step").value;
-  blds[sel].cx+=ex*s;blds[sel].cy+=ny*s;resetCalc();});
+  const nb=slideToValid(blds[sel],{...blds[sel],cx:blds[sel].cx+ex*s,cy:blds[sel].cy+ny*s});
+  blds[sel].cx=nb.cx;blds[sel].cy=nb.cy;resetCalc();});
 
 function updateCards(){
   const sa=siteArea();
@@ -1814,14 +1989,17 @@ function judgeAll(){
        dashArray:"4 3",renderer:rOver}).addTo(gOver);}));
 
   const HJ0=hikageJudge();
+  const SJ=shuujitsuJudge();
   lastJudge={bad,over,sum:{
     bcr:okB?"ok":"ng", far:okF?"ok":"ng",
     road:roadAny?(roadNG?"ng":"ok"):"warn",    // 道路の辺なし＝接道義務の確認が必要
     rin :rinAny ?(rinNG ?"ng":"ok"):"na",
-    hik :HJ0.state}};
+    hik :HJ0.state, shuu:SJ.state}};
   const HJ=HJ0,va=drawViolation(HJ);
   $("jhik").innerHTML=hikageCardHTML(HJ,va);
   $("outj").innerHTML=hikageCardHTML(HJ,va);
+  $("jshuu").innerHTML=shuujitsuCardHTML(SJ);
+  drawAllDayViolation(SJ);
 
   const slopeOK=!roadNG&&!rinNG;
   const allOK=okB&&okF&&slopeOK&&(HJ.state!=="ng");
@@ -1834,12 +2012,14 @@ function judgeAll(){
       ${chip("道路斜線 "+(roadAny?(roadNG?"×":"○"):"要確認"),roadAny?(roadNG?"ng":"ok"):"ng")}
       ${chip("隣地斜線 "+(rinAny?(rinNG?"×":"○"):"—"),rinAny?(rinNG?"ng":"ok"):"na")}
       ${chip("日影規制 "+(HJ.state==="ok"?"○":HJ.state==="ng"?"×":"—"),HJ.state)}
+      ${(SJ.state==="ok"||SJ.state==="ng")?chip("終日日影指導 "+(SJ.state==="ok"?"○":"×"),SJ.state):""}
     </div>
     ${bad.size?`<div style="color:var(--ng);margin-top:5px">斜線を超えている棟：${[...bad].map(i=>esc(blds[i].name)).join("、")}
       　地図と3Dの<b>赤い部分</b>が超過している範囲です。</div>
       <div style="color:var(--muted);margin-top:3px">斜線超過は<b>天空率</b>で適合できる場合があります
       <button class="q" data-h="sky" style="margin-left:2px">?</button></div>`:""}
-    ${roadAny?"":'<div style="color:var(--ng);margin-top:5px"><b>道路に接する辺が入力されていません。</b>接道義務（法43条）を満たしているか確認してください。</div>'}`;
+    ${roadAny?"":'<div style="color:var(--ng);margin-top:5px"><b>道路に接する辺が入力されていません。</b>接道義務（法43条）を満たしているか確認してください。</div>'}
+    ${SJ.state==="ng"?'<div style="color:var(--ng);margin-top:5px"><b>終日日影の指導基準を超えています。</b>法56条の2の日影規制とは別の、大阪市の行政指導です（③タブの「終日日影の指導」参照）。</div>':""}`;
   // タブを開かなくても結果が見えるよう、上部の常設ボタンの下にも同じ判定を
   // 1行で要約して出す（③斜線タブのjsumカードと内容は同じ）。
   const quickEl=$("judgeQuick");
@@ -1878,9 +2058,9 @@ function inShadow(u,v,ou,ov,hw,hd){
   else{let a=(v-hd)/ov,c=(v+hd)/ov;if(a>c){const t=a;a=c;c=t;}if(a>s0)s0=a;if(c<s1)s1=c;if(s0>s1)return false;}
   return s0<=s1;
 }
-function computeIso(){
+function computeIso(mhOverride){
   if(!blds.length)return{err:"建物がありません。"};
-  const mh=+$("mh").value,dt=+$("dt").value,steps=Math.round(8*60/dt);
+  const mh=mhOverride!=null?mhOverride:+$("mh").value,dt=+$("dt").value,steps=Math.round(8*60/dt);
   const BS=blds.map(BG).filter(b=>b.H-mh>0);
   if(!BS.length)return{err:"建物の高さが測定面の高さ以下です。日影は生じません。"};
   let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
@@ -1982,6 +2162,100 @@ function hikageJudge(){
   const r=lastGrid.band,ok1=r.max1<t1-1e-6,ok2=r.max2<t2-1e-6;
   return{state:(ok1&&ok2)?"ok":"ng",ok1,ok2,r,t1,t2,HR:HRobj,ER};
 }
+/* ===== [終日日影] 大阪市・大規模建築物事前協議制度の日影指導（法56条の2とは別の行政指導） ===== */
+function shuujitsuRule(z,f){
+  if(f!==300)return null;
+  if(z==="1住")return{mh:4};
+  if(z==="2住"||z==="準住"||z==="準工")return{mh:6.5};
+  return null;
+}
+/* 「大規模建築物事前協議制度」の対象建築物かどうか（3条件のいずれか）。
+   住戸数はこのアプリでは扱っていないので、手入力チェックボックスで申告してもらう。 */
+function largeScaleTarget(){
+  const sa=siteArea();
+  let maxH=0,anyBig=false;
+  blds.forEach(x=>{const b=BG(x);maxH=Math.max(maxH,b.H);
+    if(b.fArea>5000&&x.nf>=6)anyBig=true;});
+  const byHousing=!!$("shuuJyutaku").checked;
+  const bySiteHeight=sa>=2000&&maxH>=10;
+  return{target:byHousing||bySiteHeight||anyBig,maxH,sa,byHousing,bySiteHeight,anyBig};
+}
+function shuujitsuJudge(){
+  const z=$("zone").value,f=+$("far").value;
+  const SR=shuujitsuRule(z,f),LT=largeScaleTarget();
+  if(!SR)return{state:"na",reason:"対象区域外（第1種・第2種住居、準住居、準工業［埋立区域を除く］の指定容積率300%が対象）",LT};
+  if(!siteArea())return{state:"wait",reason:"敷地が未設定",SR,LT};
+  if(!blds.length)return{state:"wait",reason:"建物がありません",SR,LT};
+  if(!LT.target)return{state:"na",reason:"大規模建築物事前協議の対象要件に該当しません",SR,LT};
+  if(LT.maxH<=20)return{state:"na",reason:"対象外（地上高さ20m以下）",SR,LT};
+  const g=computeIso(SR.mh);
+  if(g.err)return{state:"wait",reason:g.err,SR,LT};
+  const P=sitePoly(),windowH=8;
+  let maxOutside=0;
+  const{V,nx,ny,cell,x0,y0}=g;
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){
+    const x=x0+(i+0.5)*cell,y=y0+(j+0.5)*cell;
+    if(inPoly(x,y,P))continue;
+    const t=V[j*nx+i];if(t>maxOutside)maxOutside=t;
+  }
+  /* Vは1刻み(dt/60時間)ずつ加算した浮動小数の積算値なので、本当は
+     ちょうど8.0h（全ステップ日影＝真の終日日影）のはずの点でも、
+     丸め誤差でごくわずかに8.0を下回ることがある（実測で約6.2e-6h＝
+     0.02秒程度のずれ）。1e-6という小さすぎる許容誤差では、この丸め誤差の
+     せいで「本当は終日日影なのに適合」と誤判定してしまう
+     （2026-08-18のJSONで実際に発生・確認）。1刻み分の半分を許容誤差に
+     取り、浮動小数の丸めは吸収しつつ「1刻みぶん足りない」正当なケース
+     とは確実に区別する。 */
+  const eps=(g.dt/60)/2;
+  const ok=maxOutside<windowH-eps;
+  return{state:ok?"ok":"ng",maxOutside,windowH,SR,LT,g};
+}
+function shuujitsuCardHTML(j){
+  const ttl=`<b>終日日影の指導</b>`;
+  if(j.state==="na")
+    return `<div class="ttl">${ttl}<span class="badge b-na">${j.reason}</span></div>
+      <div class="note">大阪市の大規模建築物事前協議制度による行政指導です。法56条の2の日影規制とは別です。
+      <button class="q" data-h="shuujitsu" style="margin-left:2px">?</button></div>`;
+  if(j.state==="wait")
+    return `<div class="ttl">${ttl}<span class="badge b-na">${j.reason}</span></div>`;
+  const ok=j.state==="ok",shortMin=Math.max(0,(j.windowH-j.maxOutside)*60);
+  return `<div class="ttl">${ttl}<span class="badge ${ok?"b-ok":"b-ng"}">${ok?"適合":"超過"}</span></div>
+    <div class="kv"><span>測定面の高さ</span><span>${j.SR.mh} m</span></div>
+    <div class="kv"><span>敷地境界線の外側でもっとも長く連続して日影になっている点</span>
+      <span><b style="color:${ok?"var(--ok)":"var(--ng)"}">${j.maxOutside.toFixed(3)} h</b>
+      （8時〜16時のうち、日影が途切れなかった時間）</span></div>
+    <div class="kv"><span>判定基準</span><span>この時間が8時間ちょうど（＝8時から16時まで1分も途切れず日影）になる点が
+      敷地境界線の外に <b style="color:${ok?"var(--ok)":"var(--ng)"}">${ok?"ない":"ある"}</b> こと ${ok?"✓":"✕"}</span></div>
+    ${ok?`<div style="color:var(--muted);margin-top:4px">もっとも際どい点でも、8時間に対して約${shortMin.toFixed(1)}分足りません
+      （＝その点は1日のうちのどこかの時間帯だけ日は当たっている＝終日日影ではない）。</div>`
+      :`<div style="color:var(--muted);margin-top:4px">地図の<b style="color:#0D6E6E">緑（青緑）</b>＝
+      8時〜16時のあいだ1分も途切れず日影になっている、敷地境界線の外側の範囲です。
+      この緑の範囲が、添付画像で言う「三角形の、8時間ずっと影になる部分」が敷地境界の外にはみ出している範囲そのものです。</div>`}
+    <div class="note" style="margin-top:6px">法56条の2の日影規制ではなく、大阪市の行政指導（要綱）です。
+    <button class="q" data-h="shuujitsu" style="margin-left:2px">?</button></div>`;
+}
+function drawAllDayViolation(j){
+  gViol2.clearLayers();
+  if(!j.g||!j.g.V)return;
+  const g=j.g,P=sitePoly();
+  const{V,nx,ny,cell,x0,y0}=g;
+  const c2=document.createElement("canvas");c2.width=nx;c2.height=ny;
+  const cx2=c2.getContext("2d"),img=cx2.createImageData(nx,ny);
+  let any=false;
+  for(let jj=0;jj<ny;jj++)for(let i=0;i<nx;i++){
+    const x=x0+(i+0.5)*cell,y=y0+(jj+0.5)*cell,k=jj*nx+i;
+    if(inPoly(x,y,P))continue;
+    if(V[k]<j.windowH-1e-6)continue;
+    any=true;
+    const px=((ny-1-jj)*nx+i)*4;
+    img.data[px]=13;img.data[px+1]=110;img.data[px+2]=110;img.data[px+3]=125;
+  }
+  if(any){
+    cx2.putImageData(img,0,0);
+    const sw=ll(x0,y0),ne=ll(x0+nx*cell,y0+ny*cell);
+    L.imageOverlay(c2.toDataURL(),[[sw[0],sw[1]],[ne[0],ne[1]]],
+      {pane:"viol2Pane",interactive:false}).addTo(gViol2);}
+}
 function manualSourceNoteHTML(ER){
   if(!ER||!ER.manual)return"";
   const applied=QGIS_META&&QGIS_META.shadow_applied;
@@ -2062,6 +2336,10 @@ function hikageCardHTML(j,va){
 }
 function drawViolation(j){
   gViol.clearLayers();
+  // 日影規制の対象区域外／未計算のときは、規制時間欄に残った値で
+  // 誤って超過表示してしまわないよう、何も描かない
+  // （j.t1/j.t2は対象区域外でも欄の値がそのまま残っているため）。
+  if(j.state!=="ok"&&j.state!=="ng")return{a1:0,a2:0};
   if(!lastGrid||!lastGrid.dist)return{a1:0,a2:0};
   const{V,dist,nx,ny,cell,x0,y0}=lastGrid;
   const c2=document.createElement("canvas");c2.width=nx;c2.height=ny;
@@ -2318,6 +2596,27 @@ const HELP={
   日影の等時間線は敷地境界からの距離で測るので、規制値さえ厳しい側に合わせれば安全側の確認になります。</p>
   <p>影が届く距離の目安は、有効高さ（建物高さ−測定面高さ）の<b>約6.7倍</b>です。
   高さ20mの建物で測定面4mなら、8時・16時の影は約107m先まで伸びます。この範囲の用途地域を確認してください。</p>`],
+ shuujitsu:["終日日影の指導とは",`
+  <p>建築基準法 第56条の2の日影規制（上の「日影規制」カード）とは<b>別の基準</b>です。
+  大阪市が「大規模建築物事前協議制度」の中で運用している<b>行政指導</b>（法律そのものではなく、市の指導要綱）で、
+  法的な確認申請の可否を直接左右するものではありませんが、大規模な計画では事前協議で必ず確認されます。</p>
+  <h5>対象区域</h5>
+  <p>第1種住居地域・第2種住居地域・準住居地域・準工業地域（<b>埋立区域を除く</b>）のうち、
+  <b>指定容積率300%</b>の区域。通常の日影規制（同じ用途地域では200%が対象）とは容積率の区分が異なります。
+  このアプリは埋立区域かどうかを判定していないので、該当しそうな場合は別途確認してください。</p>
+  <h5>対象建築物</h5>
+  <p>「大規模建築物事前協議制度」の対象建築物（次のいずれか）のうち、<b>地上高さが20mを超えるもの</b>。</p>
+  <ul>
+   <li>住宅の用途で戸数70戸以上（このアプリでは住戸数を扱っていないため、上のチェックボックスで申告してください）</li>
+   <li>建設計画の区域が2,000m²以上、かつ建築物の地上高さが10m以上</li>
+   <li>延べ面積が5,000m²を超え、かつ階数が6階以上</li>
+  </ul>
+  <h5>指導の内容</h5>
+  <p>測定面（第1種住居地域は4m、それ以外は6.5m、いずれも平均地盤面から）において、
+  <b>敷地境界線をこえて終日日影（冬至日8時〜16時の8時間すべてが日影となること）を生じないよう指導</b>されます。
+  5m／10mの距離区分はなく、敷地境界線のすぐ外側から対象になります。</p>
+  <p style="color:var(--sun)">このアプリでは、敷地境界線をそのまま基準にしています
+  （通常の日影規制で使う道路・水面等の境界線緩和は適用していません）。</p>`],
  limit:["この判定で見ていないもの",`
   <ul><li>二以上の前面道路の緩和（令132条）。<b>角地は実際より厳しい</b>判定になります。</li>
   <li>道路の反対側に水面等がある場合の緩和（令134条）。</li>
@@ -2714,6 +3013,7 @@ document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>{
 ["bcr","bcrx"].forEach(id=>$(id).addEventListener("change",()=>{updateCards();resetCalc();}));
 $("mh").addEventListener("change",resetCalc);
 $("autolv").addEventListener("change",syncLevels);
+$("shuuJyutaku").addEventListener("change",resetCalc);
 function applyLat(){
   PHI=(+$("lat0").value)*D;
   const v=+$("lat0").value,d=Math.floor(v),m=Math.round((v-d)*60);
@@ -2723,7 +3023,9 @@ $("cityp").addEventListener("change",e=>{if(e.target.value!=="custom"){$("lat0")
 $("lat0").addEventListener("input",()=>{$("cityp").value="custom";applyLat();});
 $("toggle").onclick=()=>{document.body.classList.toggle("collapsed");
   $("toggle").textContent=document.body.classList.contains("collapsed")?"＋":"−";};
-map.on("dblclick",e=>{if(sel>=0){const q=xy(e.latlng);blds[sel].cx=q[0];blds[sel].cy=q[1];resetCalc();}});
+map.on("dblclick",e=>{if(sel>=0){const q=xy(e.latlng);
+  const nb=slideToValid(blds[sel],{...blds[sel],cx:q[0],cy:q[1]});
+  blds[sel].cx=nb.cx;blds[sel].cy=nb.cy;resetCalc();}});
 map.doubleClickZoom.disable();
 map.on("click",()=>{                       // 何もない場所のクリックで選択解除
   if(document.body.classList.contains("drawing"))return;
@@ -2846,7 +3148,8 @@ function fillSheet(){
     const ng=S&&(S[k]==="ng"||S[k]==="warn");
     return `<span>${label}：<b style="color:${ng?"#C0392B":"#1F3A2E"}">${word(k)}</b></span>`;};
   $("pJudge").innerHTML=cell("建蔽率","bcr")+cell("容積率","far")
-    +cell("道路斜線","road")+cell("隣地斜線","rin")+cell("日影規制","hik");
+    +cell("道路斜線","road")+cell("隣地斜線","rin")+cell("日影規制","hik")
+    +(S&&(S.shuu==="ok"||S.shuu==="ng")?cell("終日日影指導","shuu"):"");
   $("pNote").textContent=$("memo").value||"";
   $("pDate").textContent="作成日 "+new Date().toLocaleDateString("ja-JP")+"　／　地図：国土地理院タイル　／　計画初期検討用の概略図";
 }
